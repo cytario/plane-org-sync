@@ -177,9 +177,11 @@ A user selects which Plane workspace and projects to synchronize, so that only
 relevant work items are pulled into their org workflow.
 
 **[URS-PS-10103] Map Plane States to Org TODO Keywords**
-A user defines how Plane workflow states (e.g., "Backlog", "In Progress",
-"Done") correspond to their Org TODO keywords (e.g., TODO, STARTED, DONE), so
-that state transitions are meaningful in both systems.
+A user has Plane workflow states automatically mapped to Org TODO keywords based
+on Plane's state group classification (backlog, unstarted, started, completed,
+cancelled), so that state transitions work out of the box. A user may optionally
+override the default mapping for specific states to match their personal Org
+workflow.
 
 **[URS-PS-10104] Designate Sync Target File**
 A user specifies which Org file receives synced work items, so that Plane tasks

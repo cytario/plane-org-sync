@@ -132,6 +132,12 @@ Refs: SRS-PS-510001
 `plane-org-sync-api-list-work-items (project-id &optional params callback)`
 Fetches work items for a project with optional query params (assignees, state,
 expand). Uses pagination. Returns list of work item plists.
+
+The function first attempts server-side filtering via the `?assignees=` query
+parameter. If the API returns an error indicating the parameter is not
+supported on `/work-items/`, the function retries without the filter and
+performs client-side filtering by comparing each item's assignee UUIDs against
+the authenticated user's ID.
 Refs: SRS-PS-310201
 
 **[SDS-PS-010202] Update Work Item State**
@@ -156,6 +162,14 @@ Refs: SRS-PS-310105
 Fetches the authenticated user's ID. Used for assignee filtering.
 Refs: SRS-PS-310107
 
+**Design Note: `?expand=` Parameter Availability**
+The design assumes `?expand=state,labels,assignees` is supported on the
+`/work-items/` endpoint to inline related objects and avoid separate lookups.
+If `?expand=` is not supported on `/work-items/`, the system pre-fetches and
+caches states, labels, and user data per project at the start of each sync
+cycle. These lookup tables are cached in memory for the duration of the sync
+and discarded afterward.
+
 ### 3.2 Sub-System: Sync Engine (`plane-org-sync-engine.el`)
 
 **Purpose / Responsibility**: Orchestrates the sync process. Compares remote
@@ -179,29 +193,48 @@ The function `plane-org-sync-engine--diff` accepts a list of remote work items
 and a list of local heading records (extracted from the sync file). For each
 remote item, it:
 1. Looks for a local heading with matching `PLANE_ID`
-2. If not found → emit `create` operation
-3. If found and remote `updated_at` > local `PLANE_UPDATED_AT` → emit `update` operation
-4. If found and timestamps match → emit `unchanged` (no-op)
+2. If not found -> emit `create` operation
+3. If found and remote `updated_at` > local `PLANE_UPDATED_AT` -> emit `update` operation
+4. If found and timestamps match -> emit `unchanged` (no-op)
 
-Returns an alist of `((create . items) (update . items) (unchanged . items))`.
-Refs: SRS-PS-420102
+After processing all remote items, the function identifies local headings
+whose `PLANE_ID` does not appear in the remote result set and emits
+`unchanged-orphan` for each. These headings are left completely unmodified
+(per SRS-PS-420108).
+
+Returns an alist of `((create . items) (update . items) (unchanged . items) (unchanged-orphan . items))`.
+Refs: SRS-PS-420102, SRS-PS-420108
 
 #### 3.2.2 Component: State Resolver
 
-**Purpose**: Translates between Plane state UUIDs/names and Org TODO keywords.
+**Purpose**: Translates between Plane state UUIDs/names and Org TODO keywords
+using a two-tier resolution: explicit overrides take priority, then group-based
+defaults.
 
 **[SDS-PS-020201] Resolve Plane State to Org Keyword**
-`plane-org-sync-engine--state-to-keyword (state-name)`
-Looks up `plane-org-sync-state-mapping`. Returns the mapped keyword or the
-uppercased state name as fallback.
+`plane-org-sync-engine--state-to-keyword (state-name state-group)`
+First checks `plane-org-sync-state-mapping` for an explicit override matching
+`state-name`. If found, returns the mapped keyword. Otherwise, looks up
+`plane-org-sync-group-keyword-mapping` by `state-group` and returns the group's
+default keyword.
 Refs: SRS-PS-310105
 
 **[SDS-PS-020202] Resolve Org Keyword to Plane State**
-`plane-org-sync-engine--keyword-to-state (keyword project-states)`
-Reverse-looks up the state mapping and finds the corresponding Plane state UUID
-from the project's state list. If no mapping exists, warns the user and returns
-nil (preventing the push).
-Refs: SRS-PS-310203
+`plane-org-sync-engine--keyword-to-state (keyword project-id current-state-id)`
+Implements the reverse resolution algorithm from SRS-PS-310108:
+1. Check `plane-org-sync-state-mapping` for an entry whose value matches
+   `keyword`. If found, look up the Plane state name in the project's state
+   list and return its UUID.
+2. Otherwise, resolve `keyword` to a state group via the inverse of
+   `plane-org-sync-group-keyword-mapping`. Select the first state (by API
+   `sequence` order) in that group for the given project.
+3. If `current-state-id` already belongs to the target group, return nil
+   (no change needed — states are compatible).
+4. If no matching state is found, warn the user and return nil.
+
+Accepts the heading's current `PLANE_STATE_ID` to support the "already in
+target group" optimization that avoids unnecessary API calls.
+Refs: SRS-PS-310108, SRS-PS-310203
 
 #### 3.2.3 Component: Conflict Detector
 
@@ -233,9 +266,14 @@ headings) to the buffer.
 **[SDS-PS-030101] Extract Heading Records**
 `plane-org-sync-org--read-headings (file)`
 Opens the sync file (or creates it if absent), iterates over top-level headings
-using `org-element-map`, and extracts for each: title, TODO keyword, priority,
-tags, PLANE_ID, PLANE_UPDATED_AT, position. Returns a list of heading records
-(plists).
+using `org-map-entries` with `"LEVEL=1"` match scope, and extracts for each:
+title, TODO keyword, priority, tags, PLANE_ID, PLANE_UPDATED_AT, and a point
+marker (via `point-marker`). Returns a list of heading records (plists).
+
+Point markers (not integer positions) are stored so they remain valid during
+subsequent buffer modifications in the same sync cycle. `org-map-entries` is
+used instead of `org-element-map` because the sync cycle performs mixed
+read-write operations on the buffer.
 Refs: SRS-PS-420102
 
 #### 3.3.2 Component: Org Writer
@@ -248,26 +286,50 @@ Appends a new top-level heading at the end of the sync file buffer with:
 - Headline: `{keyword} {priority} {title} {tags}`
 - SCHEDULED/DEADLINE from start_date/target_date
 - PROPERTIES drawer with all PLANE_* metadata
-- Description body (HTML → org conversion via simple regex transforms)
+- Org hyperlink to the Plane work item (e.g., `[[url][PROJ-42]]`)
+- Description body (converted from HTML via the HTML-to-Org converter, Section 3.3.4)
 
-Refs: SRS-PS-420101
+Refs: SRS-PS-420101, SRS-PS-310401
 
 **[SDS-PS-030202] Update Existing Heading**
 `plane-org-sync-org--update-heading (heading-record work-item)`
-Navigates to the heading's buffer position and updates:
+Navigates to the heading's buffer position (via point marker) and updates:
 - Headline text (title, keyword, priority, tags)
 - SCHEDULED/DEADLINE timestamps
 - PROPERTIES drawer values
-- First body paragraph (description)
+- Plane hyperlink line (first body line, before description)
+- First body paragraph after the link (description)
 
-Sub-headings and content after the first paragraph are not modified.
-Refs: SRS-PS-420103
+Sub-headings and content after the description paragraph are not modified.
+
+Updates are processed in reverse buffer order (bottom-to-top) to prevent
+earlier modifications from invalidating later heading positions. When using
+point markers this is a safety measure rather than a strict requirement, but
+it avoids subtle issues with marker relocation.
+Refs: SRS-PS-420103, SRS-PS-310401
 
 **[SDS-PS-030203] Atomic File Save**
 `plane-org-sync-org--save-atomic (buffer file)`
-Writes the buffer contents to a temporary file in the same directory
-(`{file}.tmp~`), then renames it to the target path. If the rename fails, the
-original file is untouched and an error is signaled.
+
+All sync modifications are made in the buffer visiting the sync file (obtained
+via `org-find-base-buffer-visiting` or `find-file-noselect`). After all
+modifications are complete:
+
+1. Write the buffer contents to a temporary file in the same directory
+   (`{file}.tmp~`)
+2. Rename the temporary file to the target path (atomic on POSIX)
+3. Update the visiting buffer's state: call `revert-buffer` with
+   `ignore-auto=t` and `noconfirm=t` to re-sync the buffer with the file on
+   disk, or equivalently use `set-visited-file-modtime` to update the buffer's
+   recorded modification time so Emacs does not prompt "file changed on disk"
+
+If the buffer has unsaved user modifications outside the sync regions (e.g.,
+the user edited a sub-heading while sync was running), the system detects this
+via `buffer-modified-p` before writing and aborts with a warning: "Sync file
+has unsaved modifications. Save the file first, then re-run sync."
+
+If the rename fails, the original file is untouched, the temporary file is
+cleaned up via `condition-case`, and an error is signaled.
 Refs: SRS-PS-420104
 
 #### 3.3.3 Component: Priority Mapper
@@ -275,8 +337,31 @@ Refs: SRS-PS-420104
 **[SDS-PS-030301] Map Priority Values**
 `plane-org-sync-org--priority-to-org (plane-priority)`
 Converts Plane priority strings to Org priority characters per the mapping table
-in SRS-PS-420102 (urgent/high → `?A`, medium → `?B`, low → `?C`, none → nil).
-Refs: SRS-PS-420101
+in SRS-PS-420201 (urgent/high -> `?A`, medium -> `?B`, low -> `?C`, none -> nil).
+Refs: SRS-PS-420201, SRS-PS-420101
+
+#### 3.3.4 Component: HTML-to-Org Converter
+
+**Purpose**: Converts Plane's `description_html` (Tiptap/ProseMirror HTML) to
+Org markup for insertion as heading body text.
+
+**[SDS-PS-030401] Convert HTML Description to Org Markup**
+`plane-org-sync-org--html-to-org (html-string)`
+Accepts an HTML string (or nil) and returns an Org markup string (or nil).
+
+The conversion uses a sequence of regex-based transformations applied in a
+defined order (block elements first, then inline elements, then cleanup). The
+conversion table from SRS-PS-420107 defines all supported mappings. Nested
+structures (e.g., lists inside blockquotes) are handled on a best-effort basis.
+
+When `html-string` is nil or empty, returns nil. The caller (insert/update
+heading) is responsible for omitting the description paragraph when nil is
+returned and removing any previously existing description paragraph per
+SRS-PS-420103.
+
+HTML `<table>` elements are passed through as-is (v1 limitation). All
+unrecognized HTML tags are stripped, preserving their text content.
+Refs: SRS-PS-420107, SRS-PS-420103
 
 ### 3.4 Sub-System: Config (`plane-org-sync-config.el`)
 
@@ -286,16 +371,22 @@ and provides the interactive setup wizard.
 **[SDS-PS-040001] Customization Group**
 All defcustom variables are declared under the `plane-org-sync` customization
 group.
-Refs: SRS-PS-310101 through SRS-PS-310107, URS-PS-30103
+Refs: SRS-PS-310101 through SRS-PS-310108, URS-PS-30103
 
 **[SDS-PS-040002] Setup Wizard**
 `plane-org-sync-setup` is an interactive command that walks the user through
 configuration:
 1. Prompt for instance URL (default: app.plane.so)
 2. Prompt for API key (with auth-source hint)
-3. Fetch and select workspace
-4. Fetch and select projects
-5. Fetch states for selected projects, suggest default mapping
+3. Prompt for workspace slug (user copies from their Plane URL, e.g.,
+   `https://app.plane.so/{workspace-slug}/`). The Plane API does not provide
+   a workspace enumeration endpoint accessible with a standard API key.
+4. Fetch and select projects (at least one must be selected)
+5. Fetch states for selected projects, display the auto-derived mapping for
+   confirmation (e.g., "Backlog [backlog] → TODO, In Progress [started] →
+   STARTED, Done [completed] → DONE"). If the user accepts, no
+   `plane-org-sync-state-mapping` is written (group defaults suffice). If the
+   user wants overrides, present each state for keyword assignment.
 6. Confirm sync file path
 7. Write configuration to `custom-set-variables`
 
@@ -312,21 +403,47 @@ other sub-systems.
 - Adds `org-after-todo-state-change-hook` for bidirectional state push
 - Starts the auto-sync timer (if configured)
 - Adds the sync file to `org-agenda-files` (if not already present)
+- During pull sync, sets the `:CATEGORY:` property on each synced heading to
+  the project identifier (e.g., "PROJ") so that `org-agenda` displays project
+  context in its views
 
-Refs: SRS-PS-310202, SRS-PS-310203
+Refs: SRS-PS-310202, SRS-PS-310203, SRS-PS-420101
 
 **[SDS-PS-050002] Capture Template**
 `plane-org-sync-capture-template` returns a list suitable for adding to
 `org-capture-templates`. It uses a custom `:before-finalize` function to
 POST the new work item to Plane and populate the heading's PLANE_* properties.
+
+The capture POST uses `url-retrieve-synchronously` because the
+`:before-finalize` hook runs synchronously and requires the API response (item
+ID, `sequence_id`) to populate `PLANE_*` properties before capture
+finalization. This brief block (typically <1s for a single POST) is acceptable
+for single-item creation.
 Refs: SRS-PS-310301
 
 **[SDS-PS-050003] Hook: State Change Push**
-The function added to `org-after-todo-state-change-hook` checks if the current
-heading has a `PLANE_ID` property. If yes, it invokes the sync engine's
-state push flow (conflict check → API update → metadata update). If no, it
-returns immediately (no-op).
-Refs: SRS-PS-310203, SRS-PS-310204
+The function added to `org-after-todo-state-change-hook` first checks the
+dynamic variable `plane-org-sync--inhibit-push`. If bound to `t`, the hook
+returns immediately (suppressed during pull sync). Otherwise, it checks if the
+current heading has a `PLANE_ID` property. If yes, it invokes the sync
+engine's state push flow (conflict check -> API update -> metadata update). If
+no, it returns immediately (no-op).
+Refs: SRS-PS-310203, SRS-PS-310204, SRS-PS-310206
+
+**[SDS-PS-050004] Pull Sync Push Suppression**
+During pull sync, all `org-todo` calls that update heading keywords are wrapped
+in a dynamic binding:
+
+```elisp
+(let ((plane-org-sync--inhibit-push t))
+  (org-todo keyword))
+```
+
+This prevents the `org-after-todo-state-change-hook` from triggering a push
+back to Plane for state changes that originated from Plane. The variable
+`plane-org-sync--inhibit-push` defaults to nil and is only bound to `t` during
+the pull sync's Org buffer modification phase.
+Refs: SRS-PS-310206
 
 ---
 
@@ -516,7 +633,15 @@ All API errors are caught in the HTTP layer and:
 2. Surfaced to the user via `message` with a one-line summary
 3. Never propagated as unhandled signals (which would break idle timers)
 
-### 6.4 Org File Safety
+### 6.4 Testability
+
+The conflict prompt is implemented via the variable
+`plane-org-sync-conflict-resolver` (default `#'y-or-n-p`), allowing tests to
+bind it to a stub function (e.g., `(lambda (_) t)` to always accept, or
+`(lambda (_) nil)` to always reject). This avoids interactive prompts in ERT
+tests.
+
+### 6.5 Org File Safety
 
 The Org interface never modifies the sync file directly on disk. All changes
 are made in a temporary buffer, validated (e.g., `org-lint` basic checks),

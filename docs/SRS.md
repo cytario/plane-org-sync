@@ -39,6 +39,28 @@ See URS Section 1.4. Additional terms:
 | State mapping | A bidirectional association between Plane workflow states and Org TODO keywords |
 | Sync file | The designated Org file that receives synced Plane work items |
 
+### 1.5 Scope Exclusions
+
+The following capabilities are explicitly out of scope for v1.0:
+
+| Exclusion | Rationale |
+|-----------|-----------|
+| Sub-work-item hierarchy | v1 uses a flat list only; parent-child relationships are not represented |
+| Work item types (Bug, Task, Story, Epic) | Plane's type system is not mapped to Org constructs |
+| Cycles and Modules | Sprint/feature group membership is not synced |
+| Comments (read or write) | Comment sync requires complex threading; out of scope |
+| Attachments | Binary attachment handling adds significant complexity |
+| Multi-workspace support | A single workspace is configured per installation |
+| Description push (Org to Plane) | Description is one-way: Plane to Org only |
+| Title push (Org to Plane) | Title is one-way: Plane to Org only |
+| Bulk operations | Each state change is a separate API call |
+| Webhook-based real-time sync | Requires a local HTTP server; polling is used instead |
+| Offline mode / change queue | Changes require immediate API connectivity |
+
+**Known limitations:**
+- Work item titles longer than 255 characters are truncated to 255 characters
+  in the Org heading. The full title is preserved in Plane.
+
 ---
 
 ## 2. Context Diagram
@@ -98,31 +120,60 @@ Refs: URS-PS-10101
 
 **[SRS-PS-310103] Workspace Configuration**
 The system accepts a workspace slug via `plane-org-sync-workspace`. When not
-set, the interactive command `plane-org-sync-setup` fetches available workspaces
-from the API and presents them for selection via `completing-read`.
+set, the interactive command `plane-org-sync-setup` prompts the user to enter
+their workspace slug (the slug portion of their Plane URL, e.g.,
+`https://app.plane.so/{workspace-slug}/`). The Plane API does not provide a
+workspace enumeration endpoint accessible with a standard API key.
 Refs: URS-PS-10102
 
 **[SRS-PS-310104] Project Configuration**
-The system accepts a list of project identifiers (slugs or UUIDs) via
-`plane-org-sync-projects`. When not set, `plane-org-sync-setup` fetches
-available projects from the configured workspace and presents them for
-multi-selection. An empty list means "all projects in the workspace".
+The system accepts a list of project UUIDs via `plane-org-sync-projects`. The
+user may enter project identifiers (e.g., "PROJ") during setup; the system
+resolves these to UUIDs via the `GET .../projects/` endpoint and stores UUIDs
+in `plane-org-sync-projects`. Display strings and human-readable properties use
+the project identifier; API calls use the UUID.
+
+When not set, `plane-org-sync-setup` fetches available projects from the
+configured workspace and presents them for multi-selection. The setup wizard
+requires at least one project to be selected.
+
+An empty or nil `plane-org-sync-projects` list means no projects are synced.
+If `plane-org-sync-projects` is nil when `plane-org-sync-pull` is invoked, the
+system reports an error: "No projects configured. Run M-x plane-org-sync-setup."
 Refs: URS-PS-10102
 
 **[SRS-PS-310105] State Mapping Configuration**
-The system accepts an alist via `plane-org-sync-state-mapping` that maps Plane
-state names (strings) to Org TODO keywords (strings). Example:
+The system derives a default state mapping from Plane's state group
+classification. On first sync (or when project configuration changes), the
+system fetches states from `GET .../states/` for each configured project and
+maps them by group:
+
+| State Group | Default Org Keyword | Org Done-State |
+|-------------|-------------------|----------------|
+| `backlog` | `TODO` | No |
+| `unstarted` | `TODO` | No |
+| `started` | `STARTED` | No |
+| `completed` | `DONE` | Yes |
+| `cancelled` | `CANCELLED` | Yes |
+
+The default group-to-keyword mapping is exposed as the defcustom
+`plane-org-sync-group-keyword-mapping` (alist of state-group string to Org
+keyword string). Users may change the group defaults (e.g., map `started` to
+`IN-PROGRESS` instead of `STARTED`).
+
+Additionally, the system accepts an optional alist
+`plane-org-sync-state-mapping` that overrides the group-based default for
+specific Plane state names. Example:
 
 ```elisp
-'(("Backlog"     . "TODO")
-  ("Todo"        . "TODO")
-  ("In Progress" . "STARTED")
-  ("Done"        . "DONE")
-  ("Cancelled"   . "OBSOLETE"))
+;; Only needed if the group defaults are insufficient:
+'(("In Review" . "REVIEW")
+  ("QA"        . "TESTING"))
 ```
 
-Plane states not present in the mapping are synced as-is (uppercased). Org
-keywords not present in the reverse mapping trigger a warning on push.
+States not present in the override alist use the group-based default. The
+group-based default is always available as a fallback and never requires user
+configuration.
 Refs: URS-PS-10103
 
 **[SRS-PS-310106] Sync File Configuration**
@@ -139,9 +190,22 @@ Refs: URS-PS-10201
 
 **[SRS-PS-310201] Manual Sync Command**
 The system provides the interactive command `plane-org-sync-pull` which:
-1. Fetches work items from Plane matching the configured filters
+1. Fetches work items from Plane matching the configured filters. The system
+   excludes work items where `is_draft` is true or `archived_at` is not null.
+   The system attempts server-side filtering via the `?assignees=` query
+   parameter. If the API does not support this filter on the `/work-items/`
+   endpoint, the system fetches all items and filters client-side by comparing
+   assignee UUIDs to the authenticated user's ID.
 2. Creates or updates Org headings in the sync file
 3. Reports the count of created, updated, and unchanged items in the minibuffer
+
+If no work items match the configured filters, the system reports: "Synced: 0
+items (no matching work items found)."
+
+If a multi-project sync encounters an error on one project, the system
+completes synchronization for all successful projects, reports failures for
+the failed project(s), and informs the user of partial results (e.g., "Synced
+2/3 projects. Failed: PROJ-C (HTTP 500).").
 
 The command must not block Emacs during API calls (async HTTP).
 Refs: URS-PS-10201, URS-PS-10202
@@ -163,7 +227,18 @@ When the user changes the TODO keyword on a synced Org heading (detected via
 
 If the heading has no sync metadata (not a Plane-synced item), the hook is a
 no-op.
-Refs: URS-PS-10401
+
+If the Plane API rejects a state change with HTTP 400 (e.g., due to workflow
+constraints), the system reverts the local TODO keyword to its previous value
+and displays: "State transition not allowed: {old-state} -> {new-state}". The
+API error detail is included if available.
+
+**[SRS-PS-310206] Suppress Push During Pull Sync**
+The system must suppress outbound state push when updating TODO keywords during
+a pull sync operation. When the sync engine changes a heading's TODO keyword to
+reflect the remote state, the `org-after-todo-state-change-hook` must not
+trigger a push back to Plane. This prevents feedback loops during pull sync.
+Refs: URS-PS-10401, SRS-PS-310201
 
 **[SRS-PS-310204] Conflict Detection on State Push**
 Before pushing a state change, the system compares the heading's stored
@@ -198,12 +273,13 @@ Refs: URS-PS-10501, URS-PS-10502
 
 #### 3.1.4 Navigation
 
-**[SRS-PS-310401] Open in Plane Browser**
-The system provides the interactive command `plane-org-sync-browse` which, when
-point is on a synced Org heading, opens the work item's Plane URL in the default
-browser via `browse-url`. The URL is stored in the `PLANE_URL` Org property.
-If point is not on a synced heading, the system reports "Not a Plane-synced heading".
-Refs: URS-PS-10303
+**[SRS-PS-310401] Plane Link in Synced Headings**
+Each synced Org heading includes an org-mode hyperlink to the work item's Plane
+URL. The link text is the human-readable work item identifier (e.g., `PROJ-42`).
+The link is placed as the first line of the heading body, before the description.
+The user navigates to Plane using standard `org-open-at-point` (`C-c C-o`). The
+`PLANE_URL` property is retained for programmatic use by the sync engine.
+Refs: URS-PS-10303, URS-PS-10302
 
 #### 3.1.5 Status & Diagnostics
 
@@ -276,7 +352,7 @@ by 2026-03-31).
 | `sequence_id` | integer | Part of `PLANE_URL` |
 | `updated_at` | ISO timestamp | `PLANE_UPDATED_AT` property (conflict detection) |
 | `description_html` | HTML string | Body text (converted to org markup) |
-| `project` | UUID | `PLANE_PROJECT` property |
+| `project` | UUID | `PLANE_PROJECT` property (human-readable identifier, e.g., "PROJ") + `PLANE_PROJECT_ID` property (UUID for API calls) |
 
 **Pagination:**
 - The API returns paginated results. The system must follow pagination cursors
@@ -298,10 +374,15 @@ SCHEDULED: <2026-02-20> DEADLINE: <2026-02-28>
 :PROPERTIES:
 :PLANE_ID: 01234567-89ab-cdef-0123-456789abcdef
 :PLANE_URL: https://app.plane.so/workspace/projects/abc/work-items/42
-:PLANE_PROJECT: my-project
+:PLANE_PROJECT: PROJ
+:PLANE_PROJECT_ID: fedcba98-7654-3210-fedc-ba9876543210
 :PLANE_PRIORITY: high
+:PLANE_STATE: In Progress
+:PLANE_STATE_ID: abcdef01-2345-6789-abcd-ef0123456789
 :PLANE_UPDATED_AT: 2026-02-19T10:30:00Z
+:CATEGORY: PROJ
 :END:
+[[https://app.plane.so/workspace/projects/abc/work-items/42][PROJ-42]]
 
 Description from Plane (converted to org markup).
 
@@ -309,7 +390,14 @@ Description from Plane (converted to org markup).
 These are preserved across syncs.
 ```
 
-Refs: URS-PS-10204, URS-PS-10301, URS-PS-10302
+Body content starts after the `:PROPERTIES:` drawer. The Plane link is the
+first line of body content, followed by the description paragraph.
+
+Plane label names are sanitized for Org tags: non-alphanumeric characters
+(except `_`, `@`, `#`, `%`) are replaced with underscores, and the result is
+downcased.
+
+Refs: URS-PS-10204, URS-PS-10301, URS-PS-10302, URS-PS-10303
 
 **[SRS-PS-420102] Heading Matching on Sync**
 The system matches existing headings to Plane work items by the `PLANE_ID`
@@ -322,9 +410,21 @@ When updating a synced heading, the system only modifies:
 - The headline text (title, TODO keyword, priority, tags)
 - The `SCHEDULED` and `DEADLINE` timestamps
 - The `:PROPERTIES:` drawer values
-- The first body paragraph (description from Plane)
+- The Plane link line (first body line, before description)
+- The first body paragraph after the link (description from Plane)
 
-Sub-headings and any content after the first body paragraph are preserved.
+When `description_html` is null or empty, no description paragraph is inserted.
+If a description previously existed and the remote value is now null, the
+existing description paragraph is removed on the next sync.
+
+Description text is synced one-way from Plane to Org. Local edits to the
+description paragraph may be overwritten on the next pull sync. Content added
+as sub-headings or after the description paragraph is preserved.
+
+Title text is also synced one-way from Plane to Org. Local edits to the
+heading title may be overwritten on the next pull sync.
+
+Sub-headings and any content after the description paragraph are preserved.
 Refs: URS-PS-10204
 
 **[SRS-PS-420104] Atomic File Writes**
@@ -333,7 +433,38 @@ file first, then renamed to the target path. If any error occurs during
 writing, the original file remains unchanged.
 Refs: URS-PS-10604
 
+**[SRS-PS-420107] HTML-to-Org Description Conversion**
+The system converts Plane's `description_html` (Tiptap/ProseMirror HTML) to
+Org markup using the following conversion table:
+
+| HTML Element | Org Markup |
+|-------------|-----------|
+| `<p>` | Double newline (paragraph separator) |
+| `<strong>`, `<b>` | `*bold*` |
+| `<em>`, `<i>` | `/italic/` |
+| `<code>` | `~code~` |
+| `<pre>` | `#+BEGIN_SRC ... #+END_SRC` |
+| `<a href="url">text</a>` | `[[url][text]]` |
+| `<ul>/<li>` | `- item` |
+| `<ol>/<li>` | `1. item` |
+| `<blockquote>` | `#+BEGIN_QUOTE ... #+END_QUOTE` |
+| `<h1>` through `<h6>` | Bold text (heading level stripped; content is inside an Org heading) |
+| `<img src="url">` | `[[url]]` (link only, no inline display) |
+| `<table>` | Passed through as-is (v1 limitation) |
+| All other tags | Tags stripped, text content preserved |
+
+Refs: SRS-PS-420101, SRS-PS-420103
+
+**[SRS-PS-420108] Orphaned Heading Preservation**
+Headings whose `PLANE_ID` does not appear in the current remote result set are
+left unchanged in the sync file. Their TODO keyword, properties, and content
+are not modified. This covers items that have been unassigned from the user,
+deleted, or archived in Plane. The system does not delete headings.
+Refs: URS-PS-10204, SRS-PS-420102
+
 #### 4.2.2 Priority Mapping
+
+**[SRS-PS-420201] Priority Mapping Table**
 
 | Plane Priority | Org Priority |
 |---------------|-------------|
@@ -345,6 +476,52 @@ Refs: URS-PS-10604
 
 Refs: URS-PS-10201
 
+#### 4.2.3 State Sync
+
+**[SRS-PS-420105] TODO Keyword Sequence Generation**
+The system generates and maintains a `#+TODO:` header line in the sync file
+that declares all Org keywords produced by the state mapping (group defaults
+plus overrides). Active-state keywords (from `backlog`, `unstarted`, `started`
+groups) appear before the `|` separator; done-state keywords (from `completed`,
+`cancelled` groups) appear after it.
+
+The managed `#+TODO:` line is identified by a trailing comment
+`# plane-org-sync-managed`. Other `#+TODO:` lines in the file are preserved
+unchanged. If no managed line exists, one is inserted as the first line of the
+sync file. The line is updated before heading modifications during each pull
+sync.
+Refs: SRS-PS-310105, SRS-PS-420101, URS-PS-10103
+
+**[SRS-PS-420106] Plane State Identity Properties**
+Each synced heading stores two additional properties:
+- `PLANE_STATE_ID`: The UUID of the work item's current Plane state (used for
+  reverse resolution on push)
+- `PLANE_STATE`: The human-readable name of the Plane state (informational,
+  enables Org property searches like `PLANE_STATE="In Review"`)
+
+These properties are updated on each pull sync alongside `PLANE_UPDATED_AT`.
+Refs: SRS-PS-420101, SRS-PS-310108, URS-PS-10401
+
+**[SRS-PS-310108] Reverse State Resolution for Push**
+When pushing a TODO state change to Plane, the system resolves the Org keyword
+to a Plane state UUID as follows:
+
+1. If `plane-org-sync-state-mapping` contains an entry whose value matches the
+   Org keyword, the system looks up the corresponding Plane state name in the
+   project's state list and uses its UUID. When resolution succeeds via this
+   explicit override, the state is always pushed — the group compatibility
+   check in step 3 is skipped.
+2. Otherwise, the system resolves the Org keyword to a state group via the
+   inverse of `plane-org-sync-group-keyword-mapping`, then selects the first
+   state (by API sequence order) in that group for the heading's project.
+3. If resolution came via step 2 (group-based) and the heading's current
+   `PLANE_STATE_ID` already belongs to the target group, no state change is
+   pushed (the states are considered compatible).
+4. If no matching state can be resolved, the system warns the user and does not
+   push the change.
+
+Refs: URS-PS-10401, SRS-PS-310203
+
 ---
 
 ## 5. Cross-functional Requirements
@@ -352,9 +529,12 @@ Refs: URS-PS-10201
 ### 5.1 Performance Requirements
 
 **[SRS-PS-510001] Sync Response Time**
-A manual sync of up to 200 work items must complete within 30 seconds on a
-standard broadband connection (>10 Mbps). The system must not block Emacs UI
-during sync.
+A manual sync of up to 200 work items must complete within 30 seconds
+wall-clock time on a standard broadband connection (>10 Mbps). Of this, local
+processing (diff computation, Org buffer manipulation, file write) must not
+exceed 2 seconds; the remainder is network time. The system must not block
+Emacs UI during sync (network operations are async; Org buffer writes occur in
+the async callback).
 Refs: URS-PS-10202
 
 **[SRS-PS-510002] Rate Limit Compliance**
