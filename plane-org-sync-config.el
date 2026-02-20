@@ -176,12 +176,36 @@ for an entry matching the host portion of `plane-org-sync-instance-url'."
 (defvar url-http-end-of-headers)
 (defvar url-http-response-status)
 
+(defun plane-org-sync-config--setup-request (url api-key path)
+  "Make a synchronous GET request to PATH during setup.
+URL is the instance base URL.  API-KEY is the resolved key string.
+PATH is an API path like \"/api/v1/users/me/\".
+Returns the parsed JSON plist on 2xx, signals error otherwise."
+  (let* ((full-url (concat (string-remove-suffix "/" url) path))
+         (url-request-method "GET")
+         (url-request-extra-headers
+          `(("X-API-Key" . ,api-key)
+            ("Content-Type" . "application/json")))
+         (buffer (url-retrieve-synchronously full-url nil nil 10)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (goto-char url-http-end-of-headers)
+          (let ((status url-http-response-status))
+            (unless (<= 200 status 299)
+              (error "HTTP %d" status))
+            (json-parse-buffer :object-type 'plist
+                               :null-object nil
+                               :false-object nil)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 ;;;###autoload
 (defun plane-org-sync-setup ()
   "Interactively configure plane-org-sync connection settings.
-Walks through instance URL, workspace slug, API key, and sync file
-path.  Validates the connection by calling the Plane API, then
-persists settings via `customize-save-variable'."
+Walks through instance URL, workspace slug, API key, sync file path,
+project selection, and state mapping confirmation.  Validates the
+connection by calling the Plane API, then persists settings via
+`customize-save-variable'."
   (interactive)
   ;; 1. Instance URL.
   (let ((url (read-string "Plane instance URL: "
@@ -215,40 +239,95 @@ persists settings via `customize-save-variable'."
                 (plane-org-sync-api-key api-key))
             ;; 5. Validate connection synchronously.
             (message "Validating connection...")
-            (condition-case err
-                (let* ((api-url (concat (string-remove-suffix "/" url)
-                                        "/api/v1/users/me/"))
-                       (url-request-method "GET")
-                       (url-request-extra-headers
-                        `(("X-API-Key" . ,(plane-org-sync-config--get-api-key))
-                          ("Content-Type" . "application/json")))
-                       (buffer (url-retrieve-synchronously api-url nil nil 10)))
-                  (unwind-protect
-                      (with-current-buffer buffer
-                        (goto-char url-http-end-of-headers)
-                        (let ((status url-http-response-status))
-                          (unless (<= 200 status 299)
-                            (user-error "API validation failed: HTTP %d" status))
-                          (let ((body (json-parse-buffer
-                                       :object-type 'plist
-                                       :null-object nil
-                                       :false-object nil)))
-                            (message "Connected as: %s"
-                                     (or (plist-get body :display_name)
-                                         (plist-get body :email)
-                                         "unknown user")))))
-                    (when (buffer-live-p buffer)
-                      (kill-buffer buffer))))
-              (error
-               (user-error "Connection failed: %s"
-                           (error-message-string err)))))
-          ;; 6. Persist settings.
-          (customize-save-variable 'plane-org-sync-instance-url url)
-          (customize-save-variable 'plane-org-sync-workspace workspace)
-          (when api-key
-            (customize-save-variable 'plane-org-sync-api-key api-key))
-          (customize-save-variable 'plane-org-sync-file sync-file)
-          (message "Setup complete!  Run M-x plane-org-sync-pull to sync."))))))
+            (let ((resolved-key (plane-org-sync-config--get-api-key)))
+              (condition-case err
+                  (let ((me-body (plane-org-sync-config--setup-request
+                                  url resolved-key "/api/v1/users/me/")))
+                    (message "Connected as: %s"
+                             (or (plist-get me-body :display_name)
+                                 (plist-get me-body :email)
+                                 "unknown user")))
+                (error
+                 (user-error "Connection failed: %s"
+                             (error-message-string err))))
+              ;; 6. Fetch and select projects.
+              (message "Fetching projects...")
+              (let* ((projects-body
+                      (condition-case err
+                          (plane-org-sync-config--setup-request
+                           url resolved-key
+                           (format "/api/v1/workspaces/%s/projects/" workspace))
+                        (error
+                         (user-error "Failed to fetch projects: %s"
+                                     (error-message-string err)))))
+                     (results-raw (plist-get projects-body :results))
+                     (results (if (vectorp results-raw)
+                                  (append results-raw nil)
+                                results-raw))
+                     ;; If no :results wrapper, body itself may be a vector/list.
+                     (project-list (or results
+                                       (if (vectorp projects-body)
+                                           (append projects-body nil)
+                                         projects-body)))
+                     (candidates
+                      (mapcar (lambda (p)
+                                (cons (format "%s (%s)"
+                                              (plist-get p :identifier)
+                                              (plist-get p :name))
+                                      (plist-get p :id)))
+                              project-list)))
+                (unless candidates
+                  (user-error "No projects found in workspace \"%s\"" workspace))
+                (let* ((selected (completing-read-multiple
+                                  "Select projects (comma-separated): "
+                                  candidates nil t))
+                       (selected-ids (mapcar (lambda (s)
+                                               (cdr (assoc s candidates)))
+                                             selected)))
+                  (unless selected-ids
+                    (user-error "At least one project must be selected"))
+                  ;; 7. Fetch states and display mapping.
+                  (message "Fetching workflow states...")
+                  (let ((all-states nil))
+                    (dolist (proj-id selected-ids)
+                      (condition-case nil
+                          (let* ((states-body
+                                  (plane-org-sync-config--setup-request
+                                   url resolved-key
+                                   (format "/api/v1/workspaces/%s/projects/%s/states/"
+                                           workspace proj-id)))
+                                 (raw (plist-get states-body :results))
+                                 (states (if (vectorp raw)
+                                             (append raw nil)
+                                           (or raw
+                                               (if (vectorp states-body)
+                                                   (append states-body nil)
+                                                 states-body)))))
+                            (setq all-states (append all-states states)))
+                        (error nil)))
+                    (when all-states
+                      (let ((mapping-lines nil))
+                        (dolist (s all-states)
+                          (let* ((name (plist-get s :name))
+                                 (group (plist-get s :group))
+                                 (kw (cdr (assoc (intern (or group ""))
+                                                 plane-org-sync-group-keyword-mapping)))
+                                 (override (cdr (assoc name plane-org-sync-state-mapping))))
+                            (push (format "  %s (%s) -> %s"
+                                          name group (or override kw "TODO"))
+                                  mapping-lines)))
+                        (message "State mapping:\n%s"
+                                 (mapconcat #'identity (nreverse mapping-lines) "\n"))
+                        (unless (y-or-n-p "Accept state mapping? ")
+                          (message "Customize `plane-org-sync-group-keyword-mapping' and `plane-org-sync-state-mapping' manually.")))))
+                  ;; 8. Persist settings.
+                  (customize-save-variable 'plane-org-sync-instance-url url)
+                  (customize-save-variable 'plane-org-sync-workspace workspace)
+                  (when api-key
+                    (customize-save-variable 'plane-org-sync-api-key api-key))
+                  (customize-save-variable 'plane-org-sync-file sync-file)
+                  (customize-save-variable 'plane-org-sync-projects selected-ids)
+                  (message "Setup complete!  Run M-x plane-org-sync-pull to sync."))))))))))
 
 (provide 'plane-org-sync-config)
 ;;; plane-org-sync-config.el ends here

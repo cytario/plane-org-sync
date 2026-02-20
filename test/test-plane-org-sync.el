@@ -529,16 +529,37 @@ Cleans up the temp file and any visiting buffer afterward."
 ;;;; Tests: Reset Command
 
 (ert-deftest plane-org-sync-test-reset ()
-  "Reset clears all caches."
-  (let ((plane-org-sync--state-cache '(("p1" . ((:id "s1")))))
-        (plane-org-sync--user-id "user-1")
-        (plane-org-sync--last-sync (current-time))
-        (plane-org-sync--last-sync-result '(:created 1)))
-    (plane-org-sync-reset)
-    (should-not plane-org-sync--state-cache)
-    (should-not plane-org-sync--user-id)
-    (should-not plane-org-sync--last-sync)
-    (should-not plane-org-sync--last-sync-result)))
+  "Reset clears all caches, strips properties, and triggers a pull."
+  (test-plane-org-sync--with-temp-org
+    ;; Pre-populate cache.
+    (setq plane-org-sync--state-cache '(("proj-1" . ((:id "s1")))))
+    (setq plane-org-sync--user-id "user-1")
+    (setq plane-org-sync--last-sync (current-time))
+    (setq plane-org-sync--last-sync-result '(:created 1))
+    ;; Write a heading with PLANE_* properties.
+    (with-temp-buffer
+      (insert "* TODO Test\n:PROPERTIES:\n:PLANE_ID: item-1\n")
+      (insert ":PLANE_UPDATED_AT: 2026-01-01\n:END:\n")
+      (write-region (point-min) (point-max) plane-org-sync-file nil 'quiet))
+    ;; Mock yes-or-no-p and pull.
+    (let ((pull-called nil))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+                ((symbol-function 'plane-org-sync-pull)
+                 (lambda (&optional _cb) (setq pull-called t))))
+        (plane-org-sync-reset)
+        ;; Caches cleared.
+        (should-not plane-org-sync--state-cache)
+        (should-not plane-org-sync--user-id)
+        (should-not plane-org-sync--last-sync)
+        (should-not plane-org-sync--last-sync-result)
+        ;; Pull was triggered.
+        (should pull-called)
+        ;; PLANE_* properties should be stripped from the file.
+        (let ((content (with-temp-buffer
+                         (insert-file-contents plane-org-sync-file)
+                         (buffer-string))))
+          (should-not (string-match-p ":PLANE_ID:" content))
+          (should-not (string-match-p ":PLANE_UPDATED_AT:" content)))))))
 
 ;;;; Tests: Pull Rejects Modified Buffer
 

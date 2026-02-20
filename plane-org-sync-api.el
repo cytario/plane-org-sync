@@ -11,6 +11,20 @@
 ;; HTTP client for the Plane.so REST API.  Provides async request/paginate
 ;; for pull operations and synchronous request for push operations.
 ;; Handles authentication, pagination, rate limiting, and error recovery.
+;;
+;; Callback conventions:
+;;
+;; Single-resource functions (api-me, api-list-states, api-get-work-item,
+;; api-update-work-item, api-create-work-item):
+;;   CALLBACK receives (STATUS-CODE PARSED-BODY) on success, or
+;;   (nil ERROR-MESSAGE) on error.
+;;
+;; Paginated list functions (api-list-work-items, api-list-projects,
+;; api-list-labels):
+;;   CALLBACK receives (RESULTS-LIST) on success -- a single argument
+;;   containing the accumulated list of items.  On error, CALLBACK
+;;   receives (nil ERROR-MESSAGE) -- two arguments where the first is
+;;   nil and the second is the error string.
 
 ;;; Code:
 
@@ -315,7 +329,7 @@ called with the full results list when done."
          (full-path (if query-string
                         (concat path separator query-string)
                       path)))
-    (plane-org-sync-api--request
+    (plane-org-sync-api--request-with-retry
      "GET" full-path nil
      (lambda (status-code body)
        (if (null status-code)
@@ -347,7 +361,7 @@ called with the full results list when done."
   "Fetch the authenticated user's profile.
 CALLBACK is called with (STATUS-CODE USER-PLIST) on success, or
 \(nil ERROR-MESSAGE) on error."
-  (plane-org-sync-api--request "GET" "/users/me/" nil callback))
+  (plane-org-sync-api--request-with-retry "GET" "/users/me/" nil callback))
 
 (defun plane-org-sync-api-list-states (project-id callback)
   "Fetch workflow states for PROJECT-ID.
@@ -357,7 +371,7 @@ CALLBACK is called with the list of state plists on success, or
                       "/projects/" project-id "/states/")))
     ;; States are not paginated (typically <20 per project),
     ;; but extract :results if wrapped.
-    (plane-org-sync-api--request
+    (plane-org-sync-api--request-with-retry
      "GET"
      (string-remove-prefix (plane-org-sync-api--base-url) path)
      nil
@@ -405,7 +419,7 @@ CALLBACK is called with (STATUS-CODE ITEM-PLIST) on success, or
   (let ((path (concat "/workspaces/" plane-org-sync-workspace
                       "/projects/" project-id
                       "/work-items/" item-id "/")))
-    (plane-org-sync-api--request "GET" path nil callback)))
+    (plane-org-sync-api--request-with-retry "GET" path nil callback)))
 
 (defun plane-org-sync-api-update-work-item (project-id item-id data callback)
   "Update work item ITEM-ID in PROJECT-ID with DATA.
@@ -415,7 +429,7 @@ CALLBACK is called with (STATUS-CODE RESPONSE-PLIST) on success, or
   (let ((path (concat "/workspaces/" plane-org-sync-workspace
                       "/projects/" project-id
                       "/work-items/" item-id "/")))
-    (plane-org-sync-api--request "PATCH" path data callback)))
+    (plane-org-sync-api--request-with-retry "PATCH" path data callback)))
 
 (defun plane-org-sync-api-list-projects (callback)
   "Fetch projects in the configured workspace.
@@ -440,7 +454,7 @@ DATA is a plist with fields like :name, :state, :priority, :labels,
 success, or (nil ERROR-MESSAGE) on error."
   (let ((path (concat "/workspaces/" plane-org-sync-workspace
                       "/projects/" project-id "/work-items/")))
-    (plane-org-sync-api--request "POST" path data callback)))
+    (plane-org-sync-api--request-with-retry "POST" path data callback)))
 
 (provide 'plane-org-sync-api)
 ;;; plane-org-sync-api.el ends here

@@ -43,6 +43,10 @@
 
 ;;;; Async Utilities
 
+;; NOTE: `plane-org-sync--chain' is not used in the current pull flow
+;; (which uses `--collect' for fan-out).  It is retained as a utility
+;; for future multi-step sequential async flows (e.g., chained updates).
+
 (defun plane-org-sync--chain (steps &optional error-callback)
   "Chain async functions sequentially, threading results through callbacks.
 Each element of STEPS is a function receiving (NEXT &rest PREV-RESULTS).
@@ -107,12 +111,16 @@ corresponding result slot is (:error . message)."
 
 ;;;; Timer Management
 
+;; Forward-declare the mode variable; defined later by `define-minor-mode'.
+(defvar plane-org-sync-mode)
+
 (defvar plane-org-sync--timer nil
   "Idle timer for automatic sync.")
 
 (defun plane-org-sync--schedule-auto-sync ()
   "Schedule the next auto sync after idle interval."
-  (when (and plane-org-sync-auto-interval
+  (when (and plane-org-sync-mode
+             plane-org-sync-auto-interval
              (not plane-org-sync--timer))
     (setq plane-org-sync--timer
           (run-with-idle-timer
@@ -273,11 +281,10 @@ with the sync result plist."
                                   (kw (plane-org-sync-engine--state-to-keyword
                                        state-name state-group)))
                              ;; Enrich work item with resolved state info.
-                             (plist-put (copy-sequence item)
-                                        :state_name state-name)
-                             (plist-put item :state_name state-name)
-                             (plist-put item :state_group state-group)
-                             (plist-put item :state_id state-id)
+                             ;; plist-put may return a new list; always capture.
+                             (setq item (plist-put item :state_name state-name))
+                             (setq item (plist-put item :state_group state-group))
+                             (setq item (plist-put item :state_id state-id))
                              (cons kw item)))
                          items))
                        ;; Compute diff.
@@ -451,21 +458,53 @@ and adds `plane-org-sync-file' to `org-agenda-files'."
                                            :unchanged) 0))
                    "No results"))
          (cached-projects (length plane-org-sync--state-cache))
-         (user-id (or plane-org-sync--user-id "Unknown")))
-    (message "Plane: last sync=%s  result=(%s)  cached-projects=%d  user=%s"
-             last-sync result cached-projects user-id)))
+         (user-id (or plane-org-sync--user-id "Unknown"))
+         (auto-sync (cond
+                     ((not plane-org-sync-mode) "mode off")
+                     (plane-org-sync-auto-interval
+                      (format "every %ds" plane-org-sync-auto-interval))
+                     (t "manual only"))))
+    (message "Plane: last sync=%s  result=(%s)  cached-projects=%d  user=%s  auto-sync=%s"
+             last-sync result cached-projects user-id auto-sync)))
 
 ;;;; Reset Command
 
 ;;;###autoload
 (defun plane-org-sync-reset ()
-  "Clear all plane-org-sync caches and state."
+  "Clear sync metadata and perform a fresh pull from Plane.
+Prompts for confirmation, then removes all PLANE_* properties from
+headings in the sync file, clears in-memory caches, and triggers a
+full re-sync.
+
+Note: this removes sync metadata (PLANE_* properties) from headings
+but preserves heading content.  After the re-pull, headings are
+re-matched by PLANE_ID and updated."
   (interactive)
+  (unless (yes-or-no-p "Reset all sync state and re-pull from Plane? ")
+    (user-error "Reset cancelled"))
+  ;; Strip PLANE_* properties from all headings in the sync file.
+  (when (and plane-org-sync-file (file-exists-p plane-org-sync-file))
+    (let ((buf (find-file-noselect plane-org-sync-file)))
+      (with-current-buffer buf
+        (org-with-wide-buffer
+         (org-map-entries
+          (lambda ()
+            (let ((props '("PLANE_ID" "PLANE_URL" "PLANE_UPDATED_AT"
+                           "PLANE_STATE" "PLANE_STATE_ID"
+                           "PLANE_PROJECT_ID" "PLANE_PROJECT"
+                           "PLANE_PRIORITY" "PLANE_ASSIGNEES")))
+              (dolist (prop props)
+                (org-entry-delete nil prop))))
+          "LEVEL=1"))
+        (save-buffer))))
+  ;; Clear in-memory caches.
   (setq plane-org-sync--state-cache nil)
   (setq plane-org-sync--user-id nil)
   (setq plane-org-sync--last-sync nil)
   (setq plane-org-sync--last-sync-result nil)
-  (message "plane-org-sync: cache cleared"))
+  (message "plane-org-sync: state cleared, starting fresh pull...")
+  ;; Trigger a fresh pull.
+  (plane-org-sync-pull))
 
 ;;;; Capture Template
 
@@ -492,11 +531,25 @@ Add to `org-capture-templates' like:
           "* TODO %^{Title}\n:PROPERTIES:\n:END:\n"
           :before-finalize #'plane-org-sync--capture-before-finalize)))
 
+(defun plane-org-sync--capture-fetch-labels (project-id)
+  "Fetch labels for PROJECT-ID synchronously for capture prompts.
+Returns a list of label plists, or nil on failure."
+  (condition-case nil
+      (let* ((path (format "/workspaces/%s/projects/%s/labels/"
+                           plane-org-sync-workspace project-id))
+             (response (plane-org-sync-api--request-sync "GET" path))
+             (raw (plist-get response :results)))
+        (if (vectorp raw) (append raw nil)
+          (or raw
+              (if (vectorp response) (append response nil)
+                response))))
+    (error nil)))
+
 (defun plane-org-sync--capture-before-finalize ()
   "Create a Plane work item for the heading being captured.
 Called from the `:before-finalize' hook of the capture template.
-Posts the work item synchronously and sets PLANE_* properties on
-the heading."
+Prompts for project, priority, and labels, then posts the work
+item synchronously and sets PLANE_* properties on the heading."
   (require 'org-capture)
   (when (and (bound-and-true-p org-capture-mode)
              plane-org-sync-workspace
@@ -507,13 +560,34 @@ the heading."
                                           nil t)))
            (title (save-excursion
                     (org-back-to-heading t)
-                    (org-get-heading t t t t))))
+                    (org-get-heading t t t t)))
+           ;; Prompt for priority.
+           (priority (completing-read "Priority: "
+                                      '("none" "low" "medium" "high" "urgent")
+                                      nil t nil nil "none"))
+           ;; Prompt for labels.
+           (available-labels (plane-org-sync--capture-fetch-labels project-id))
+           (label-candidates (mapcar (lambda (l)
+                                       (cons (plist-get l :name)
+                                             (plist-get l :id)))
+                                     available-labels))
+           (selected-label-names (when label-candidates
+                                   (completing-read-multiple
+                                    "Labels (comma-separated, or empty): "
+                                    label-candidates nil t)))
+           (selected-label-ids (mapcar (lambda (name)
+                                         (cdr (assoc name label-candidates)))
+                                       selected-label-names)))
       (when (and project-id (not (string-empty-p title)))
         (condition-case err
             (let* ((path (format "/workspaces/%s/projects/%s/work-items/"
                                  plane-org-sync-workspace project-id))
+                   (body (list :name title :priority priority))
+                   (_body (when selected-label-ids
+                            (setq body (plist-put body :labels
+                                                  (vconcat selected-label-ids)))))
                    (result (plane-org-sync-api--request-sync
-                            "POST" path (list :name title))))
+                            "POST" path body)))
               (when result
                 (let ((item-id (plist-get result :id))
                       (updated-at (or (plist-get result :updated_at) ""))
@@ -538,7 +612,7 @@ the heading."
                   (org-entry-put nil "PLANE_STATE_ID" state-id)
                   (org-entry-put nil "PLANE_PROJECT_ID" project-id)
                   (org-entry-put nil "PLANE_PROJECT" project-identifier)
-                  (org-entry-put nil "PLANE_PRIORITY" "none")
+                  (org-entry-put nil "PLANE_PRIORITY" priority)
                   (org-entry-put nil "PLANE_ASSIGNEES" "")
                   (message "Plane: created work item %s-%s"
                            project-identifier sequence-id))))

@@ -29,12 +29,16 @@
      ,@body))
 
 (defmacro plane-org-sync-test-with-mock-api (request-fn &rest body)
-  "Execute BODY with `plane-org-sync-api--request' overridden by REQUEST-FN.
+  "Execute BODY with API request functions overridden by REQUEST-FN.
 REQUEST-FN receives (METHOD PATH BODY CALLBACK) and should call CALLBACK
-appropriately.  Test configuration is also bound."
+appropriately.  Both `--request' and `--request-with-retry' are mocked
+so resource functions work regardless of which they call.
+Test configuration is also bound."
   (declare (indent 1) (debug (form body)))
   `(plane-org-sync-test-with-config
      (cl-letf (((symbol-function 'plane-org-sync-api--request)
+                ,request-fn)
+               ((symbol-function 'plane-org-sync-api--request-with-retry)
                 ,request-fn))
        ,@body)))
 
@@ -479,8 +483,8 @@ STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
   "Paginate should handle single-page responses."
   (let ((received nil))
     (plane-org-sync-test-with-config
-      (cl-letf (((symbol-function 'plane-org-sync-api--request)
-                 (lambda (_method _path _body callback)
+      (cl-letf (((symbol-function 'plane-org-sync-api--request-with-retry)
+                 (lambda (_method _path _body callback &optional _retry)
                    (funcall callback 200
                             '(:results [(:id "a") (:id "b")]
                               :next_page_results nil
@@ -497,8 +501,8 @@ STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
   (let ((received nil)
         (call-count 0))
     (plane-org-sync-test-with-config
-      (cl-letf (((symbol-function 'plane-org-sync-api--request)
-                 (lambda (_method path _body callback)
+      (cl-letf (((symbol-function 'plane-org-sync-api--request-with-retry)
+                 (lambda (_method path _body callback &optional _retry)
                    (cl-incf call-count)
                    (if (= call-count 1)
                        ;; First page
@@ -526,8 +530,8 @@ STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
   "Paginate should propagate errors from --request."
   (let ((received-err nil))
     (plane-org-sync-test-with-config
-      (cl-letf (((symbol-function 'plane-org-sync-api--request)
-                 (lambda (_method _path _body callback)
+      (cl-letf (((symbol-function 'plane-org-sync-api--request-with-retry)
+                 (lambda (_method _path _body callback &optional _retry)
                    (funcall callback nil "Connection refused"))))
         (plane-org-sync-api--paginate
          "/test/path/" nil
@@ -560,8 +564,8 @@ STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
   "Paginate should include query parameters in the request."
   (let ((captured-path nil))
     (plane-org-sync-test-with-config
-      (cl-letf (((symbol-function 'plane-org-sync-api--request)
-                 (lambda (_method path _body callback)
+      (cl-letf (((symbol-function 'plane-org-sync-api--request-with-retry)
+                 (lambda (_method path _body callback &optional _retry)
                    (setq captured-path path)
                    (funcall callback 200
                             '(:results [] :next_page_results nil)))))
