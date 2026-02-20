@@ -168,18 +168,33 @@ blocking time: 5s request + 2s backoff + 5s retry = 12s."
                     (signal 'error (list (format "Request error: %s"
                                                  (error-message-string err))))))))
     (plane-org-sync-api--log 'info "SYNC %s %s" method full-url)
+    (unless buffer
+      (error "No response from %s (url-retrieve returned nil)"
+             (url-host (url-generic-parse-url
+                        plane-org-sync-instance-url))))
     (unwind-protect
         (with-current-buffer buffer
+          (unless url-http-end-of-headers
+            (error "Incomplete HTTP response from %s"
+                   (url-host (url-generic-parse-url
+                              plane-org-sync-instance-url))))
           (goto-char url-http-end-of-headers)
-          (let ((status url-http-response-status))
+          (let ((status url-http-response-status)
+                (body-start (point)))
             (cond
              ((<= 200 status 299)
-              (condition-case nil
+              (condition-case _err
                   (json-parse-buffer :object-type 'plist
                                      :null-object nil
                                      :false-object nil)
                 (json-parse-error
-                 (error "Invalid JSON response from Plane API"))))
+                 (let ((preview (buffer-substring
+                                 body-start
+                                 (min (+ body-start 300) (point-max)))))
+                   (error "Plane API returned HTTP %d but the response is not valid JSON.\n\
+This usually means a proxy, CDN, or misconfigured URL is returning an HTML page.\n\
+Instance URL: %s\nResponse preview: %s"
+                          status plane-org-sync-instance-url preview)))))
              ((= status 429)
               ;; Single retry after 2s backoff
               (kill-buffer buffer)
@@ -193,21 +208,56 @@ blocking time: 5s request + 2s backoff + 5s retry = 12s."
                         (signal 'error
                                 (list (format "Retry failed: %s"
                                               (error-message-string err))))))))
+                (unless retry-buf
+                  (error "No response from %s on retry (url-retrieve returned nil)"
+                         (url-host (url-generic-parse-url
+                                    plane-org-sync-instance-url))))
                 (unwind-protect
                     (with-current-buffer retry-buf
+                      (unless url-http-end-of-headers
+                        (error "Incomplete HTTP response from %s (retry)"
+                               (url-host (url-generic-parse-url
+                                          plane-org-sync-instance-url))))
                       (goto-char url-http-end-of-headers)
-                      (if (<= 200 url-http-response-status 299)
-                          (condition-case nil
-                              (json-parse-buffer :object-type 'plist
-                                                 :null-object nil
-                                                 :false-object nil)
-                            (json-parse-error
-                             (error "Invalid JSON response from Plane API")))
-                        (error "Plane API error: HTTP %d (after retry)"
-                               url-http-response-status)))
+                      (let ((retry-status url-http-response-status)
+                            (retry-body-start (point)))
+                        (if (<= 200 retry-status 299)
+                            (condition-case _err
+                                (json-parse-buffer :object-type 'plist
+                                                   :null-object nil
+                                                   :false-object nil)
+                              (json-parse-error
+                               (let ((preview (buffer-substring
+                                               retry-body-start
+                                               (min (+ retry-body-start 300)
+                                                    (point-max)))))
+                                 (error "Plane API returned HTTP %d but the response is not valid JSON.\n\
+This usually means a proxy, CDN, or misconfigured URL is returning an HTML page.\n\
+Instance URL: %s\nResponse preview: %s"
+                                        retry-status
+                                        plane-org-sync-instance-url
+                                        preview))))
+                          (let ((preview (buffer-substring
+                                          retry-body-start
+                                          (min (+ retry-body-start 200)
+                                               (point-max)))))
+                            (error "Plane API error: HTTP %d from %s (after retry)\n\
+Response preview: %s"
+                                   retry-status
+                                   (url-host (url-generic-parse-url
+                                              plane-org-sync-instance-url))
+                                   preview)))))
                   (when (buffer-live-p retry-buf)
                     (kill-buffer retry-buf)))))
-             (t (error "Plane API error: HTTP %d" status)))))
+             (t
+              (let ((preview (buffer-substring
+                              body-start
+                              (min (+ body-start 200) (point-max)))))
+                (error "Plane API error: HTTP %d from %s\nResponse preview: %s"
+                       status
+                       (url-host (url-generic-parse-url
+                                  plane-org-sync-instance-url))
+                       preview))))))
       (when (and buffer (buffer-live-p buffer))
         (kill-buffer buffer)))))
 

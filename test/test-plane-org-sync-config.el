@@ -108,5 +108,108 @@
                     :type 'user-error)
       (should-not auth-source-called))))
 
+;;;; Setup Request -- HTTP Response Handling
+
+(defun plane-org-sync-config-test--make-http-buffer (status-code body-string)
+  "Create a buffer simulating a url-retrieve-synchronously response.
+STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
+  (let ((buf (generate-new-buffer " *test-http-response*")))
+    (with-current-buffer buf
+      (insert (format "HTTP/1.1 %d OK\r\n" status-code))
+      (insert "Content-Type: application/json\r\n")
+      (insert "\r\n")
+      (let ((header-end (point)))
+        (insert body-string)
+        (setq-local url-http-end-of-headers header-end)
+        (setq-local url-http-response-status status-code)))
+    buf))
+
+(defun plane-org-sync-config-test--make-http-buffer-no-headers
+    (body-string)
+  "Create a buffer simulating an incomplete HTTP response.
+BODY-STRING is inserted but `url-http-end-of-headers' is left nil."
+  (let ((buf (generate-new-buffer " *test-http-response*")))
+    (with-current-buffer buf
+      (insert body-string)
+      (setq-local url-http-end-of-headers nil)
+      (setq-local url-http-response-status nil))
+    buf))
+
+(ert-deftest plane-org-sync-config-test-setup-request-json-success ()
+  "Setup request should return parsed JSON on 2xx with valid JSON."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _args)
+               (plane-org-sync-config-test--make-http-buffer
+                200 "{\"id\": \"user-1\", \"email\": \"test@example.com\"}"))))
+    (let ((result (plane-org-sync-config--setup-request
+                   "https://plane.example.com" "test-key"
+                   "/api/v1/users/me/")))
+      (should (equal "user-1" (plist-get result :id)))
+      (should (equal "test@example.com" (plist-get result :email))))))
+
+(ert-deftest plane-org-sync-config-test-setup-request-nil-buffer ()
+  "Setup request should signal error when url-retrieve returns nil."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _args) nil)))
+    (should-error (plane-org-sync-config--setup-request
+                   "https://plane.example.com" "test-key"
+                   "/api/v1/users/me/")
+                  :type 'error)))
+
+(ert-deftest plane-org-sync-config-test-setup-request-nil-buffer-message ()
+  "Setup request nil buffer error should mention the host."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _args) nil)))
+    (condition-case err
+        (plane-org-sync-config--setup-request
+         "https://plane.example.com" "test-key" "/api/v1/users/me/")
+      (error
+       (should (string-match-p "plane\\.example\\.com"
+                               (error-message-string err)))
+       (should (string-match-p "url-retrieve returned nil"
+                               (error-message-string err)))))))
+
+(ert-deftest plane-org-sync-config-test-setup-request-nil-headers ()
+  "Setup request should signal error when url-http-end-of-headers is nil."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _args)
+               (plane-org-sync-config-test--make-http-buffer-no-headers
+                "incomplete response"))))
+    (should-error (plane-org-sync-config--setup-request
+                   "https://plane.example.com" "test-key"
+                   "/api/v1/users/me/")
+                  :type 'error)))
+
+(ert-deftest plane-org-sync-config-test-setup-request-invalid-json ()
+  "Setup request should signal descriptive error on non-JSON 200 response."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _args)
+               (plane-org-sync-config-test--make-http-buffer
+                200 "<html><body>Welcome to Nginx</body></html>"))))
+    (condition-case err
+        (plane-org-sync-config--setup-request
+         "https://plane.example.com" "test-key" "/api/v1/users/me/")
+      (error
+       (let ((msg (error-message-string err)))
+         (should (string-match-p "not valid JSON" msg))
+         (should (string-match-p "proxy, CDN, or misconfigured URL" msg))
+         (should (string-match-p "plane\\.example\\.com" msg))
+         (should (string-match-p "Nginx" msg)))))))
+
+(ert-deftest plane-org-sync-config-test-setup-request-non-2xx ()
+  "Setup request should include host and body preview in non-2xx errors."
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _args)
+               (plane-org-sync-config-test--make-http-buffer
+                403 "{\"detail\": \"Authentication failed\"}"))))
+    (condition-case err
+        (plane-org-sync-config--setup-request
+         "https://plane.example.com" "test-key" "/api/v1/users/me/")
+      (error
+       (let ((msg (error-message-string err)))
+         (should (string-match-p "403" msg))
+         (should (string-match-p "plane\\.example\\.com" msg))
+         (should (string-match-p "Authentication failed" msg)))))))
+
 (provide 'test-plane-org-sync-config)
 ;;; test-plane-org-sync-config.el ends here

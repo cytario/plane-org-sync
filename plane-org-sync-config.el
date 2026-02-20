@@ -187,15 +187,36 @@ Returns the parsed JSON plist on 2xx, signals error otherwise."
           `(("X-API-Key" . ,api-key)
             ("Content-Type" . "application/json")))
          (buffer (url-retrieve-synchronously full-url nil nil 10)))
+    (unless buffer
+      (error "No response from %s (url-retrieve returned nil)"
+             (url-host (url-generic-parse-url url))))
     (unwind-protect
         (with-current-buffer buffer
+          (unless url-http-end-of-headers
+            (error "Incomplete HTTP response from %s"
+                   (url-host (url-generic-parse-url url))))
           (goto-char url-http-end-of-headers)
-          (let ((status url-http-response-status))
+          (let ((status url-http-response-status)
+                (body-start (point)))
             (unless (<= 200 status 299)
-              (error "HTTP %d" status))
-            (json-parse-buffer :object-type 'plist
-                               :null-object nil
-                               :false-object nil)))
+              (let ((preview (buffer-substring
+                              body-start
+                              (min (+ body-start 200) (point-max)))))
+                (error "Plane API error: HTTP %d from %s\nResponse preview: %s"
+                       status (url-host (url-generic-parse-url url))
+                       preview)))
+            (condition-case _err
+                (json-parse-buffer :object-type 'plist
+                                   :null-object nil
+                                   :false-object nil)
+              (json-parse-error
+               (let ((preview (buffer-substring
+                               body-start
+                               (min (+ body-start 300) (point-max)))))
+                 (error "Plane API returned HTTP %d but the response is not valid JSON.\n\
+This usually means a proxy, CDN, or misconfigured URL is returning an HTML page.\n\
+Instance URL: %s\nResponse preview: %s"
+                        status url preview))))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

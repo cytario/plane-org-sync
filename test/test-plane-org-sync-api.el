@@ -214,6 +214,51 @@ STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
       (should-error (plane-org-sync-api--request-sync "GET" "/users/me/")
                     :type 'error))))
 
+(ert-deftest plane-org-sync-api-test-request-sync-malformed-json-message ()
+  "Synchronous request JSON error should include status, URL, and body preview."
+  (plane-org-sync-test-with-config
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (_url &rest _args)
+                 (plane-org-sync-test--make-http-buffer
+                  200 "<html><body>Welcome to Nginx</body></html>"))))
+      (condition-case err
+          (plane-org-sync-api--request-sync "GET" "/users/me/")
+        (error
+         (let ((msg (error-message-string err)))
+           (should (string-match-p "not valid JSON" msg))
+           (should (string-match-p "proxy, CDN, or misconfigured URL" msg))
+           (should (string-match-p "plane\\.example\\.com" msg))
+           (should (string-match-p "Nginx" msg))))))))
+
+(ert-deftest plane-org-sync-api-test-request-sync-nil-buffer ()
+  "Synchronous request should signal error when url-retrieve returns nil."
+  (plane-org-sync-test-with-config
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (_url &rest _args) nil)))
+      (condition-case err
+          (plane-org-sync-api--request-sync "GET" "/users/me/")
+        (error
+         (let ((msg (error-message-string err)))
+           (should (string-match-p "url-retrieve returned nil" msg))
+           (should (string-match-p "plane\\.example\\.com" msg))))))))
+
+(ert-deftest plane-org-sync-api-test-request-sync-nil-headers ()
+  "Synchronous request should signal error when url-http-end-of-headers is nil."
+  (plane-org-sync-test-with-config
+    (let ((buf (generate-new-buffer " *test-http-incomplete*")))
+      (with-current-buffer buf
+        (insert "incomplete")
+        (setq-local url-http-end-of-headers nil)
+        (setq-local url-http-response-status nil))
+      (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                 (lambda (_url &rest _args) buf)))
+        (condition-case err
+            (plane-org-sync-api--request-sync "GET" "/users/me/")
+          (error
+           (let ((msg (error-message-string err)))
+             (should (string-match-p "Incomplete HTTP response" msg))
+             (should (string-match-p "plane\\.example\\.com" msg)))))))))
+
 (ert-deftest plane-org-sync-api-test-request-sync-server-error ()
   "Synchronous request should signal error on 5xx."
   (plane-org-sync-test-with-config
@@ -233,6 +278,21 @@ STATUS-CODE is the HTTP status.  BODY-STRING is the response body."
                   404 "{\"detail\": \"not found\"}"))))
       (should-error (plane-org-sync-api--request-sync "GET" "/bad/path/")
                     :type 'error))))
+
+(ert-deftest plane-org-sync-api-test-request-sync-error-includes-context ()
+  "Non-2xx error should include HTTP status, host, and body preview."
+  (plane-org-sync-test-with-config
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (_url &rest _args)
+                 (plane-org-sync-test--make-http-buffer
+                  502 "<html>Bad Gateway</html>"))))
+      (condition-case err
+          (plane-org-sync-api--request-sync "GET" "/users/me/")
+        (error
+         (let ((msg (error-message-string err)))
+           (should (string-match-p "502" msg))
+           (should (string-match-p "plane\\.example\\.com" msg))
+           (should (string-match-p "Bad Gateway" msg))))))))
 
 ;;;; Async Request -- api-me
 
