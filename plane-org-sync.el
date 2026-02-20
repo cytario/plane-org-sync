@@ -41,6 +41,95 @@
 (defvar org-state)
 (defvar org-last-state)
 
+;;;; Expanded Field Normalizers
+
+;; When the API is called with ?expand=state,labels,assignees, the
+;; response fields may contain nested objects instead of plain
+;; UUID strings.  These helpers extract the needed values defensively,
+;; handling both expanded (plist) and plain (string/vector) forms.
+
+(defun plane-org-sync--normalize-state (item)
+  "Extract state id, name, and group from ITEM, handling expanded fields.
+When ?expand=state is used, ITEM's :state is a plist with :id, :name,
+:group.  Without expand, :state is a UUID string and :state_detail may
+hold the nested object.  Returns ITEM with :state_id, :state_name,
+and :state_group set."
+  (let ((state-val (plist-get item :state)))
+    (cond
+     ;; Expanded: :state is a plist with :id
+     ((and (listp state-val) (plist-get state-val :id))
+      (setq item (plist-put item :state_name (plist-get state-val :name)))
+      (setq item (plist-put item :state_group (plist-get state-val :group)))
+      (setq item (plist-put item :state_id (plist-get state-val :id)))
+      ;; Normalize :state back to a UUID for downstream code
+      (setq item (plist-put item :state (plist-get state-val :id))))
+     ;; Non-expanded: :state_detail may have the info
+     ((plist-get item :state_detail)
+      (let ((detail (plist-get item :state_detail)))
+        (setq item (plist-put item :state_name
+                              (or (plist-get detail :name)
+                                  (plist-get item :state_name))))
+        (setq item (plist-put item :state_group
+                              (or (plist-get detail :group)
+                                  (plist-get item :state_group))))
+        (setq item (plist-put item :state_id
+                              (or (plist-get detail :id)
+                                  state-val)))))
+     ;; Plain UUID string
+     ((stringp state-val)
+      (unless (plist-get item :state_id)
+        (setq item (plist-put item :state_id state-val)))))
+    item))
+
+(defun plane-org-sync--normalize-labels (item)
+  "Normalize ITEM's :labels field for both expanded and plain forms.
+When expanded, :labels is a vector/list of plists with :name, :id, etc.
+When not expanded, :labels is a vector of UUID strings.  This function
+ensures :labels is always a list of plists with at least :name.
+Returns the modified ITEM."
+  (let ((labels (plist-get item :labels)))
+    (when (and labels (> (length labels) 0))
+      (let ((label-list (if (vectorp labels) (append labels nil) labels)))
+        ;; Check if first element is a string (UUID) rather than a plist
+        (when (stringp (car label-list))
+          ;; Plain UUIDs -- convert to plists with :id only (no :name available)
+          (setq label-list (mapcar (lambda (id) (list :id id :name id))
+                                   label-list)))
+        (setq item (plist-put item :labels label-list)))))
+  item)
+
+(defun plane-org-sync--normalize-assignees (item)
+  "Normalize ITEM's assignee fields for both expanded and plain forms.
+When ?expand=assignees is used, :assignees contains objects with
+:display_name, :id, etc.  Without expand, :assignees is a vector of
+UUID strings and :assignee_details may hold the objects.  This function
+ensures :assignee_details is a list of plists with :display_name.
+Returns the modified ITEM."
+  (let ((assignees (plist-get item :assignees))
+        (details (plist-get item :assignee_details)))
+    (cond
+     ;; Already have assignee_details -- use as-is
+     ((and details (> (length details) 0))
+      (when (vectorp details)
+        (setq item (plist-put item :assignee_details (append details nil)))))
+     ;; Expanded: :assignees contains objects
+     ((and assignees (> (length assignees) 0))
+      (let ((assignee-list (if (vectorp assignees)
+                               (append assignees nil)
+                             assignees)))
+        (when (and assignee-list (listp (car assignee-list)))
+          ;; Expanded objects -- use as assignee_details
+          (setq item (plist-put item :assignee_details assignee-list)))))))
+  item)
+
+(defun plane-org-sync--normalize-work-item (item)
+  "Normalize all expanded fields in ITEM.
+Handles state, labels, and assignees.  Returns the normalized ITEM."
+  (setq item (plane-org-sync--normalize-state item))
+  (setq item (plane-org-sync--normalize-labels item))
+  (setq item (plane-org-sync--normalize-assignees item))
+  item)
+
 ;;;; Async Utilities
 
 ;; NOTE: `plane-org-sync--chain' is not used in the current pull flow
@@ -251,14 +340,14 @@ with the sync result plist."
                          (lambda (h)
                            (equal (plist-get h :plane-project-id) project-id))
                          headings))
-                       ;; Resolve state for each work item.
+                       ;; Normalize and resolve state for each work item.
                        (resolved-items
                         (mapcar
                          (lambda (item)
-                           (let* ((state-detail (plist-get item :state_detail))
-                                  (state-name
-                                   (or (plist-get state-detail :name)
-                                       (plist-get item :state_name)
+                           ;; Normalize expanded fields (state, labels, assignees).
+                           (setq item (plane-org-sync--normalize-work-item item))
+                           (let* ((state-name
+                                   (or (plist-get item :state_name)
                                        ;; Fallback: look up in states list.
                                        (let ((st (seq-find
                                                   (lambda (s)
@@ -267,8 +356,7 @@ with the sync result plist."
                                                   states)))
                                          (when st (plist-get st :name)))))
                                   (state-group
-                                   (or (plist-get state-detail :group)
-                                       (plist-get item :state_group)
+                                   (or (plist-get item :state_group)
                                        (let ((st (seq-find
                                                   (lambda (s)
                                                     (equal (plist-get s :id)
@@ -276,7 +364,7 @@ with the sync result plist."
                                                   states)))
                                          (when st (plist-get st :group)))))
                                   (state-id
-                                   (or (plist-get state-detail :id)
+                                   (or (plist-get item :state_id)
                                        (plist-get item :state)))
                                   (kw (plane-org-sync-engine--state-to-keyword
                                        state-name state-group)))

@@ -580,5 +580,139 @@ Cleans up the temp file and any visiting buffer afterward."
   (let ((plane-org-sync-projects nil))
     (should-error (plane-org-sync-pull) :type 'user-error)))
 
+;;;; Tests: Expanded Field Normalizers
+
+(ert-deftest plane-org-sync-test-normalize-state-expanded ()
+  "Normalizer extracts state info from an expanded state plist."
+  (let* ((item (list :id "item-1"
+                     :state (list :id "state-1" :name "In Progress"
+                                  :group "started" :color "#F59E0B")))
+         (result (plane-org-sync--normalize-state item)))
+    (should (equal (plist-get result :state) "state-1"))
+    (should (equal (plist-get result :state_id) "state-1"))
+    (should (equal (plist-get result :state_name) "In Progress"))
+    (should (equal (plist-get result :state_group) "started"))))
+
+(ert-deftest plane-org-sync-test-normalize-state-plain-uuid ()
+  "Normalizer handles plain UUID state field."
+  (let* ((item (list :id "item-1" :state "state-uuid-123"))
+         (result (plane-org-sync--normalize-state item)))
+    (should (equal (plist-get result :state) "state-uuid-123"))
+    (should (equal (plist-get result :state_id) "state-uuid-123"))))
+
+(ert-deftest plane-org-sync-test-normalize-state-with-detail ()
+  "Normalizer extracts from state_detail when state is a UUID."
+  (let* ((item (list :id "item-1"
+                     :state "state-uuid-123"
+                     :state_detail (list :id "state-uuid-123"
+                                         :name "Done" :group "completed")))
+         (result (plane-org-sync--normalize-state item)))
+    (should (equal (plist-get result :state_name) "Done"))
+    (should (equal (plist-get result :state_group) "completed"))
+    (should (equal (plist-get result :state_id) "state-uuid-123"))))
+
+(ert-deftest plane-org-sync-test-normalize-labels-expanded ()
+  "Normalizer handles expanded label objects."
+  (let* ((item (list :id "item-1"
+                     :labels (vector (list :id "lbl-1" :name "Backend")
+                                     (list :id "lbl-2" :name "Frontend"))))
+         (result (plane-org-sync--normalize-labels item))
+         (labels (plist-get result :labels)))
+    (should (listp labels))
+    (should (= 2 (length labels)))
+    (should (equal "Backend" (plist-get (car labels) :name)))))
+
+(ert-deftest plane-org-sync-test-normalize-labels-uuid-strings ()
+  "Normalizer converts UUID string labels to plists."
+  (let* ((item (list :id "item-1"
+                     :labels (vector "uuid-1" "uuid-2")))
+         (result (plane-org-sync--normalize-labels item))
+         (labels (plist-get result :labels)))
+    (should (listp labels))
+    (should (= 2 (length labels)))
+    (should (equal "uuid-1" (plist-get (car labels) :name)))))
+
+(ert-deftest plane-org-sync-test-normalize-assignees-expanded ()
+  "Normalizer populates assignee_details from expanded :assignees."
+  (let* ((item (list :id "item-1"
+                     :assignees (vector (list :id "u-1"
+                                              :display_name "Alice")
+                                        (list :id "u-2"
+                                              :display_name "Bob"))
+                     :assignee_details []))
+         (result (plane-org-sync--normalize-assignees item))
+         (details (plist-get result :assignee_details)))
+    (should (listp details))
+    (should (= 2 (length details)))
+    (should (equal "Alice" (plist-get (car details) :display_name)))))
+
+(ert-deftest plane-org-sync-test-normalize-assignees-keeps-existing-details ()
+  "Normalizer keeps existing assignee_details when populated."
+  (let* ((details (vector (list :display_name "Existing")))
+         (item (list :id "item-1"
+                     :assignees []
+                     :assignee_details details))
+         (result (plane-org-sync--normalize-assignees item)))
+    (should (equal "Existing"
+                   (plist-get (car (plist-get result :assignee_details))
+                              :display_name)))))
+
+;;;; Tests: Full Pull with Expanded API Fields
+
+(ert-deftest plane-org-sync-test-pull-expanded-state ()
+  "Pull handles expanded state objects instead of UUID strings."
+  (test-plane-org-sync--with-temp-org
+    (let* ((states (test-plane-org-sync--make-states))
+           ;; Simulate expanded API response: :state is a plist, not a UUID.
+           (items (list (list :id "item-exp-1"
+                              :name "Expanded State Item"
+                              :project "proj-1"
+                              :project_identifier "TEST"
+                              :sequence_id 99
+                              :state (list :id "state-started"
+                                           :name "In Progress"
+                                           :group "started"
+                                           :color "#F59E0B")
+                              :priority "medium"
+                              :updated_at "2026-01-20T10:00:00Z"
+                              :description_html nil
+                              :labels (vector (list :id "lbl-1"
+                                                    :name "Backend"))
+                              :assignees (vector (list :id "u-1"
+                                                       :display_name "Alice"))
+                              :assignee_details []
+                              :start_date nil
+                              :target_date nil
+                              :is_draft nil
+                              :archived_at nil)))
+           (sync-done nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      ;; Should succeed without error.
+      (should sync-done)
+      (should (= (plist-get sync-done :created) 1))
+      ;; Verify org file content.
+      (let ((content (with-temp-buffer
+                       (insert-file-contents plane-org-sync-file)
+                       (buffer-string))))
+        ;; Headline should have STARTED keyword (from state group "started").
+        (should (string-match-p "STARTED" content))
+        (should (string-match-p "Expanded State Item" content))
+        ;; State name should be written to property.
+        (should (string-match-p ":PLANE_STATE: In Progress" content))
+        (should (string-match-p ":PLANE_STATE_ID: state-started" content))
+        ;; Label should appear as tag.
+        (should (string-match-p ":backend:" content))
+        ;; Assignee should appear in property.
+        (should (string-match-p ":PLANE_ASSIGNEES: Alice" content))))))
+
 (provide 'test-plane-org-sync)
 ;;; test-plane-org-sync.el ends here

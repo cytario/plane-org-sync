@@ -288,11 +288,14 @@ with :name).  Returns a string like \"* KEYWORD [#P] Title  :tag1:tag2:\"."
   (let* ((name (plist-get work-item :name))
          (priority-char (plane-org-sync-org--priority-to-org
                          (plist-get work-item :priority)))
-         (labels (plist-get work-item :labels))
+         (labels-raw (plist-get work-item :labels))
+         (labels (when labels-raw
+                   (if (vectorp labels-raw) (append labels-raw nil) labels-raw)))
          (tags (when (and labels (> (length labels) 0))
                  (mapconcat (lambda (l)
                               (plane-org-sync-org--sanitize-tag
-                               (plist-get l :name)))
+                               (if (stringp l) l
+                                 (or (plist-get l :name) ""))))
                             labels ":")))
          (parts (list "*")))
     (when keyword
@@ -342,11 +345,20 @@ even when description is nil."
               (state-name (or (plist-get work-item :state_name) ""))
               (state-id (or (plist-get work-item :state_id) ""))
               (priority (or (plist-get work-item :priority) "none"))
-              (assignees (plist-get work-item :assignee_details))
+              (assignees-raw (or (plist-get work-item :assignee_details)
+                                 (plist-get work-item :assignees)))
+              (assignees (when assignees-raw
+                           (if (vectorp assignees-raw)
+                               (append assignees-raw nil)
+                             assignees-raw)))
               (assignee-str (if (and assignees (> (length assignees) 0))
-                                (mapconcat (lambda (a)
-                                             (or (plist-get a :display_name) ""))
-                                           assignees ", ")
+                                (mapconcat
+                                 (lambda (a)
+                                   (if (stringp a) a
+                                     (or (plist-get a :display_name)
+                                         (plist-get a :first_name)
+                                         "")))
+                                 assignees ", ")
                               ""))
               (updated-at (or (plist-get work-item :updated_at) "")))
          (insert ":PROPERTIES:\n")
@@ -418,11 +430,20 @@ Sub-headings and content after the description-end sentinel are preserved."
               (state-name (or (plist-get work-item :state_name) ""))
               (state-id (or (plist-get work-item :state_id) ""))
               (priority (or (plist-get work-item :priority) "none"))
-              (assignees (plist-get work-item :assignee_details))
+              (assignees-raw (or (plist-get work-item :assignee_details)
+                                 (plist-get work-item :assignees)))
+              (assignees (when assignees-raw
+                           (if (vectorp assignees-raw)
+                               (append assignees-raw nil)
+                             assignees-raw)))
               (assignee-str (if (and assignees (> (length assignees) 0))
-                                (mapconcat (lambda (a)
-                                             (or (plist-get a :display_name) ""))
-                                           assignees ", ")
+                                (mapconcat
+                                 (lambda (a)
+                                   (if (stringp a) a
+                                     (or (plist-get a :display_name)
+                                         (plist-get a :first_name)
+                                         "")))
+                                 assignees ", ")
                               ""))
               (updated-at (or (plist-get work-item :updated_at) "")))
          (org-entry-put nil "PLANE_ID" (plist-get work-item :id))
