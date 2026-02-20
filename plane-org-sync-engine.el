@@ -174,6 +174,19 @@ groups.  Both lists are deduplicated."
 
 ;;;; Diff Calculation
 
+(defun plane-org-sync-engine--heading-needs-repair-p (heading)
+  "Return non-nil if HEADING has missing or empty critical metadata.
+This detects headings created by older code versions that lack
+PLANE_PROJECT_ID, PLANE_STATE_ID, or PLANE_STATE properties.
+Such headings should be updated even when timestamps match to
+repair the missing data."
+  (or (let ((v (plist-get heading :plane-project-id)))
+        (or (null v) (string-empty-p v)))
+      (let ((v (plist-get heading :plane-state-id)))
+        (or (null v) (string-empty-p v)))
+      (let ((v (plist-get heading :plane-state)))
+        (or (null v) (string-empty-p v)))))
+
 (defun plane-org-sync-engine--diff (remote-items local-headings)
   "Compute a sync diff between REMOTE-ITEMS and LOCAL-HEADINGS.
 REMOTE-ITEMS is a list of work item plists from the API, each
@@ -184,9 +197,9 @@ plists from the Org reader, each with :plane-id and
 Returns a plist with keys:
   :create    - remote items not found locally
   :update    - pairs of (heading-record . work-item) where
-               timestamps differ
+               timestamps differ or heading metadata needs repair
   :unchanged - pairs of (heading-record . work-item) where
-               timestamps match
+               timestamps match and metadata is complete
   :orphaned  - local headings not found in remote items"
   (let ((local-by-id (make-hash-table :test #'equal))
         (seen-local-ids (make-hash-table :test #'equal))
@@ -205,10 +218,12 @@ Returns a plist with keys:
         (if heading
             (progn
               (puthash item-id t seen-local-ids)
-              (if (equal (plist-get item :updated_at)
-                         (plist-get heading :plane-updated-at))
-                  (push (cons heading item) unchanged)
-                (push (cons heading item) update)))
+              (if (or (not (equal (plist-get item :updated_at)
+                                  (plist-get heading :plane-updated-at)))
+                      (plane-org-sync-engine--heading-needs-repair-p
+                       heading))
+                  (push (cons heading item) update)
+                (push (cons heading item) unchanged)))
           (push item create))))
     ;; Find orphaned local headings (not in remote set).
     (dolist (heading local-headings)

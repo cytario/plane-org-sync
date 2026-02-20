@@ -714,5 +714,112 @@ Cleans up the temp file and any visiting buffer afterward."
         ;; Assignee should appear in property.
         (should (string-match-p ":PLANE_ASSIGNEES: Alice" content))))))
 
+;;;; Tests: Legacy Heading Repair (Bug Fixes)
+
+(ert-deftest plane-org-sync-test-pull-repairs-legacy-headings ()
+  "Pull repairs headings with missing PLANE_PROJECT_ID, state, and wrong URL.
+Simulates upgrading from an older version that did not set these properties."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (result nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; Pre-populate with a legacy heading: no PLANE_PROJECT_ID,
+      ;; empty state, and an api.plane.so URL.
+      (with-temp-buffer
+        (insert "#+TODO: BACKLOG TODO STARTED | DONE CANCELLED  # plane-org-sync-managed\n")
+        (insert "* STARTED Test Item item-1\n")
+        (insert ":PROPERTIES:\n")
+        (insert ":PLANE_ID: item-1\n")
+        (insert ":PLANE_URL: https://api.plane.so/test-ws/projects/proj-1/work-items/42\n")
+        (insert ":PLANE_UPDATED_AT: 2026-01-15T10:00:00Z\n")
+        (insert ":PLANE_STATE: \n")
+        (insert ":PLANE_STATE_ID: \n")
+        (insert ":END:\n")
+        (insert "# plane-org-sync-description-begin\n")
+        (insert "# plane-org-sync-description-end\n")
+        (write-region (point-min) (point-max) plane-org-sync-file nil 'quiet))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (r) (setq result r))))
+      ;; Should be updated (repaired), not created as duplicate.
+      (should (= (plist-get result :created) 0))
+      (should (= (plist-get result :updated) 1))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents plane-org-sync-file)
+                       (buffer-string))))
+        ;; Only one PLANE_ID occurrence (no duplicate).
+        (let ((count 0) (start 0))
+          (while (string-match ":PLANE_ID: item-1" content start)
+            (setq count (1+ count))
+            (setq start (match-end 0)))
+          (should (= count 1)))
+        ;; State should now be populated.
+        (should (string-match-p ":PLANE_STATE: In Progress" content))
+        (should (string-match-p ":PLANE_STATE_ID: state-started" content))
+        ;; Project ID should now be populated.
+        (should (string-match-p ":PLANE_PROJECT_ID: proj-1" content))
+        ;; URL should use the instance URL (not api.plane.so).
+        ;; The test uses plane.example.com via the test macro.
+        (should (string-match-p "plane\\.example\\.com" content))
+        (should-not (string-match-p "api\\.plane\\.so" content))))))
+
+(ert-deftest plane-org-sync-test-pull-no-duplicate-missing-project-id ()
+  "Pull does not create duplicates when PLANE_PROJECT_ID is missing.
+This is the exact scenario from the user bug report."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (result-1 nil)
+          (result-2 nil)
+          (result-3 nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; Pre-populate with heading that has NO PLANE_PROJECT_ID.
+      (with-temp-buffer
+        (insert "#+TODO: BACKLOG TODO STARTED | DONE CANCELLED  # plane-org-sync-managed\n")
+        (insert "* TODO Test Item item-1\n")
+        (insert ":PROPERTIES:\n")
+        (insert ":PLANE_ID: item-1\n")
+        (insert ":PLANE_URL: https://api.plane.so/test-ws/projects/proj-1/work-items/42\n")
+        (insert ":PLANE_UPDATED_AT: 2026-01-15T10:00:00Z\n")
+        (insert ":PLANE_STATE: \n")
+        (insert ":PLANE_STATE_ID: \n")
+        (insert ":END:\n")
+        (write-region (point-min) (point-max) plane-org-sync-file nil 'quiet))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        ;; First pull: should repair, not duplicate.
+        (plane-org-sync-pull (lambda (r) (setq result-1 r)))
+        (should (= (plist-get result-1 :created) 0))
+        ;; Second pull: should be unchanged now.
+        (plane-org-sync-pull (lambda (r) (setq result-2 r)))
+        (should (= (plist-get result-2 :created) 0))
+        (should (= (plist-get result-2 :unchanged) 1))
+        ;; Third pull: still unchanged.
+        (plane-org-sync-pull (lambda (r) (setq result-3 r)))
+        (should (= (plist-get result-3 :created) 0))
+        (should (= (plist-get result-3 :unchanged) 1)))
+      ;; Verify exactly one PLANE_ID in final file.
+      (let ((content (with-temp-buffer
+                       (insert-file-contents plane-org-sync-file)
+                       (buffer-string))))
+        (let ((count 0) (start 0))
+          (while (string-match ":PLANE_ID: item-1" content start)
+            (setq count (1+ count))
+            (setq start (match-end 0)))
+          (should (= count 1)))))))
+
 (provide 'test-plane-org-sync)
 ;;; test-plane-org-sync.el ends here

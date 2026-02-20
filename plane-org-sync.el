@@ -335,10 +335,19 @@ with the sync result plist."
                        (states (plist-get pr :states))
                        (project-id (plist-get pr :project-id))
                        ;; Filter headings for this project.
+                       ;; Include headings that either match the project
+                       ;; or have nil/empty PLANE_PROJECT_ID (legacy
+                       ;; headings from before that property was added).
+                       ;; The diff matches by PLANE_ID (globally unique
+                       ;; UUID), so including unaffiliated headings
+                       ;; prevents duplicates without cross-project risk.
                        (proj-headings
                         (seq-filter
                          (lambda (h)
-                           (equal (plist-get h :plane-project-id) project-id))
+                           (let ((h-proj (plist-get h :plane-project-id)))
+                             (or (equal h-proj project-id)
+                                 (null h-proj)
+                                 (string-empty-p h-proj))))
                          headings))
                        ;; Normalize and resolve state for each work item.
                        (resolved-items

@@ -230,8 +230,12 @@
   "All items need update when timestamps differ."
   (let* ((remote (list (list :id "r1" :updated_at "2026-01-02T00:00:00Z")
                        (list :id "r2" :updated_at "2026-01-03T00:00:00Z")))
-         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z")
-                      (list :plane-id "r2" :plane-updated-at "2026-01-01T00:00:00Z")))
+         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s1"
+                            :plane-state "Todo")
+                      (list :plane-id "r2" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s2"
+                            :plane-state "Done")))
          (result (plane-org-sync-engine--diff remote local)))
     (should (null (plist-get result :create)))
     (should (= (length (plist-get result :update)) 2))
@@ -243,11 +247,15 @@
       (should (equal (plist-get (cdr first-update) :id) "r1")))))
 
 (ert-deftest plane-org-sync-engine-test-diff-all-unchanged ()
-  "All items unchanged when timestamps match."
+  "All items unchanged when timestamps match and metadata is complete."
   (let* ((remote (list (list :id "r1" :updated_at "2026-01-01T00:00:00Z")
                        (list :id "r2" :updated_at "2026-01-02T00:00:00Z")))
-         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z")
-                      (list :plane-id "r2" :plane-updated-at "2026-01-02T00:00:00Z")))
+         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s1"
+                            :plane-state "Todo")
+                      (list :plane-id "r2" :plane-updated-at "2026-01-02T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s2"
+                            :plane-state "Done")))
          (result (plane-org-sync-engine--diff remote local)))
     (should (null (plist-get result :create)))
     (should (null (plist-get result :update)))
@@ -259,8 +267,12 @@
   (let* ((remote (list (list :id "r1" :updated_at "2026-01-01T00:00:00Z")   ; unchanged
                        (list :id "r2" :updated_at "2026-01-03T00:00:00Z")   ; update
                        (list :id "r3" :updated_at "2026-01-01T00:00:00Z"))) ; create
-         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z")
-                      (list :plane-id "r2" :plane-updated-at "2026-01-02T00:00:00Z")))
+         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s1"
+                            :plane-state "Todo")
+                      (list :plane-id "r2" :plane-updated-at "2026-01-02T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s2"
+                            :plane-state "Done")))
          (result (plane-org-sync-engine--diff remote local)))
     (should (= (length (plist-get result :create)) 1))
     (should (equal (plist-get (car (plist-get result :create)) :id) "r3"))
@@ -272,9 +284,15 @@
 (ert-deftest plane-org-sync-engine-test-diff-orphaned ()
   "Local headings not in remote are orphaned."
   (let* ((remote (list (list :id "r1" :updated_at "2026-01-01T00:00:00Z")))
-         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z")
-                      (list :plane-id "r2" :plane-updated-at "2026-01-01T00:00:00Z")
-                      (list :plane-id "r3" :plane-updated-at "2026-01-01T00:00:00Z")))
+         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s1"
+                            :plane-state "Todo")
+                      (list :plane-id "r2" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s2"
+                            :plane-state "Done")
+                      (list :plane-id "r3" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s3"
+                            :plane-state "In Progress")))
          (result (plane-org-sync-engine--diff remote local)))
     (should (= (length (plist-get result :unchanged)) 1))
     (should (= (length (plist-get result :orphaned)) 2))
@@ -285,8 +303,12 @@
 
 (ert-deftest plane-org-sync-engine-test-diff-empty-remote ()
   "Empty remote list makes all local headings orphaned."
-  (let* ((local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z")
-                      (list :plane-id "r2" :plane-updated-at "2026-01-02T00:00:00Z")))
+  (let* ((local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s1"
+                            :plane-state "Todo")
+                      (list :plane-id "r2" :plane-updated-at "2026-01-02T00:00:00Z"
+                            :plane-project-id "proj-1" :plane-state-id "s2"
+                            :plane-state "Done")))
          (result (plane-org-sync-engine--diff nil local)))
     (should (null (plist-get result :create)))
     (should (null (plist-get result :update)))
@@ -336,6 +358,49 @@
 (ert-deftest plane-org-sync-engine-test-detect-conflict-nil-both ()
   "Nil both timestamps is not a conflict."
   (should-not (plane-org-sync-engine--detect-conflict nil nil)))
+
+;;;; heading-needs-repair-p Tests
+
+(ert-deftest plane-org-sync-engine-test-heading-needs-repair-missing-project-id ()
+  "Heading with nil :plane-project-id needs repair."
+  (should (plane-org-sync-engine--heading-needs-repair-p
+           (list :plane-id "r1" :plane-project-id nil
+                 :plane-state-id "s1" :plane-state "Todo"))))
+
+(ert-deftest plane-org-sync-engine-test-heading-needs-repair-empty-project-id ()
+  "Heading with empty :plane-project-id needs repair."
+  (should (plane-org-sync-engine--heading-needs-repair-p
+           (list :plane-id "r1" :plane-project-id ""
+                 :plane-state-id "s1" :plane-state "Todo"))))
+
+(ert-deftest plane-org-sync-engine-test-heading-needs-repair-missing-state-id ()
+  "Heading with nil :plane-state-id needs repair."
+  (should (plane-org-sync-engine--heading-needs-repair-p
+           (list :plane-id "r1" :plane-project-id "proj-1"
+                 :plane-state-id nil :plane-state "Todo"))))
+
+(ert-deftest plane-org-sync-engine-test-heading-needs-repair-empty-state ()
+  "Heading with empty :plane-state needs repair."
+  (should (plane-org-sync-engine--heading-needs-repair-p
+           (list :plane-id "r1" :plane-project-id "proj-1"
+                 :plane-state-id "s1" :plane-state ""))))
+
+(ert-deftest plane-org-sync-engine-test-heading-needs-repair-complete ()
+  "Complete heading does not need repair."
+  (should-not (plane-org-sync-engine--heading-needs-repair-p
+               (list :plane-id "r1" :plane-project-id "proj-1"
+                     :plane-state-id "s1" :plane-state "Todo"))))
+
+(ert-deftest plane-org-sync-engine-test-diff-repair-triggers-update ()
+  "Heading with matching timestamp but missing metadata is classified as update."
+  (let* ((remote (list (list :id "r1" :updated_at "2026-01-01T00:00:00Z")))
+         (local (list (list :plane-id "r1" :plane-updated-at "2026-01-01T00:00:00Z"
+                            :plane-project-id nil :plane-state-id ""
+                            :plane-state "")))
+         (result (plane-org-sync-engine--diff remote local)))
+    (should (null (plist-get result :create)))
+    (should (= (length (plist-get result :update)) 1))
+    (should (null (plist-get result :unchanged)))))
 
 (provide 'test-plane-org-sync-engine)
 ;;; test-plane-org-sync-engine.el ends here
