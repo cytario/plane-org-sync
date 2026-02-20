@@ -376,11 +376,16 @@ Refs: SRS-PS-310101 through SRS-PS-310108, URS-PS-30103
 **[SDS-PS-040002] Setup Wizard**
 `plane-org-sync-setup` is an interactive command that walks the user through
 configuration:
-1. Prompt for instance URL (default: app.plane.so)
+1. Prompt for instance URL (default: api.plane.so, the API base URL)
 2. Prompt for API key (with auth-source hint)
-3. Prompt for workspace slug (user copies from their Plane URL, e.g.,
+3. Prompt for workspace slug (user copies from their Plane browser URL, e.g.,
    `https://app.plane.so/{workspace-slug}/`). The Plane API does not provide
    a workspace enumeration endpoint accessible with a standard API key.
+
+Note: `plane-org-sync-instance-url` is the API base URL (default:
+`https://api.plane.so` for Plane Cloud), which is distinct from the browser
+URL (`https://app.plane.so`). Self-hosted instances typically use the same
+host for both API and browser access.
 4. Fetch and select projects (at least one must be selected)
 5. Fetch states for selected projects, display the auto-derived mapping for
    confirmation (e.g., "Backlog [backlog] → TODO, In Progress [started] →

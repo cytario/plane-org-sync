@@ -60,7 +60,7 @@ git clone https://github.com/martin/plane-org-sync.git ~/.emacs.d/site-lisp/plan
              plane-org-sync-status
              plane-org-sync-mode)
   :custom
-  (plane-org-sync-instance-url "https://app.plane.so")
+  (plane-org-sync-instance-url "https://api.plane.so")
   (plane-org-sync-workspace "my-workspace")
   (plane-org-sync-projects '("project-uuid-here"))
   (plane-org-sync-file "~/org/plane.org")
@@ -90,7 +90,7 @@ M-x plane-org-sync-setup
 ```
 
 The wizard walks you through:
-1. Plane instance URL (default: `https://app.plane.so`)
+1. Plane API URL (default: `https://api.plane.so`)
 2. Workspace slug (the slug portion of your Plane URL)
 3. API key (enter directly or use auth-source)
 4. Sync file path
@@ -115,7 +115,7 @@ M-x plane-org-sync-pull
 Add to your Emacs init file:
 
 ```elisp
-(setq plane-org-sync-instance-url "https://app.plane.so")
+(setq plane-org-sync-instance-url "https://api.plane.so")
 (setq plane-org-sync-workspace "my-workspace")
 (setq plane-org-sync-projects '("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"))
 (setq plane-org-sync-file "~/org/plane.org")
@@ -136,7 +136,7 @@ All settings are exposed as `defcustom` variables, configurable via
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `plane-org-sync-instance-url` | string | `"https://app.plane.so"` | Base URL of the Plane instance. Must use HTTPS. |
+| `plane-org-sync-instance-url` | string | `"https://api.plane.so"` | API base URL of the Plane instance. Must use HTTPS. For Plane Cloud, this is `api.plane.so` (not `app.plane.so`, which is the browser URL). Self-hosted instances typically use the same host for both. |
 | `plane-org-sync-api-key` | string or nil | `nil` | API key. When nil, retrieved from auth-source. |
 | `plane-org-sync-workspace` | string or nil | `nil` | Workspace slug (e.g., `"my-team"`). |
 
@@ -343,10 +343,10 @@ supports encrypted storage.
 Create or edit `~/.authinfo.gpg` (GPG-encrypted) with:
 
 ```
-machine app.plane.so password plane_api_xxxxxxxxxxxxxxxx
+machine api.plane.so password plane_api_xxxxxxxxxxxxxxxx
 ```
 
-For self-hosted instances, replace `app.plane.so` with your instance hostname.
+For self-hosted instances, replace `api.plane.so` with your instance hostname.
 
 Then set `plane-org-sync-api-key` to nil (the default) so the key is retrieved
 from auth-source:
@@ -359,7 +359,7 @@ from auth-source:
 
 If you use `auth-source-macos-keychain`, add an entry with:
 - Account: (any)
-- Server: `app.plane.so`
+- Server: `api.plane.so`
 - Password: your API key
 
 ### Direct Configuration (not recommended)

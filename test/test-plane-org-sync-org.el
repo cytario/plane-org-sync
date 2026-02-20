@@ -136,6 +136,12 @@ OVERRIDES is a plist of keys to override."
                  (plane-org-sync-org--build-plane-url
                   "https://app.plane.so" "my-ws" "proj-123" 42))))
 
+(ert-deftest plane-org-sync-org-test-build-plane-url-rewrites-api-to-app ()
+  "API URL api.plane.so is rewritten to app.plane.so for browser links."
+  (should (equal "https://app.plane.so/my-ws/projects/proj-123/work-items/42"
+                 (plane-org-sync-org--build-plane-url
+                  "https://api.plane.so" "my-ws" "proj-123" 42))))
+
 (ert-deftest plane-org-sync-org-test-build-plane-url-strips-trailing-slash ()
   "Trailing slash on instance URL is stripped."
   (should (equal "https://plane.example.com/ws/projects/p1/work-items/7"
@@ -428,7 +434,7 @@ This ensures &lt; does not create false tags."
 (ert-deftest plane-org-sync-org-test-insert-heading-full ()
   "Insert a full heading with all fields."
   (plane-org-sync-test-with-org-buffer ""
-    (let ((plane-org-sync-instance-url "https://app.plane.so")
+    (let ((plane-org-sync-instance-url "https://api.plane.so")
           (plane-org-sync-workspace "my-ws")
           (item (plane-org-sync-test--make-work-item
                  :name "Auth module"
@@ -464,7 +470,7 @@ This ensures &lt; does not create false tags."
 (ert-deftest plane-org-sync-org-test-insert-heading-minimal ()
   "Insert a minimal heading with no dates, labels, or description."
   (plane-org-sync-test-with-org-buffer ""
-    (let ((plane-org-sync-instance-url "https://app.plane.so")
+    (let ((plane-org-sync-instance-url "https://api.plane.so")
           (plane-org-sync-workspace "ws")
           (item (plane-org-sync-test--make-work-item
                  :name "Bare item"
@@ -482,7 +488,7 @@ This ensures &lt; does not create false tags."
 (ert-deftest plane-org-sync-org-test-insert-heading-nil-description-sentinels ()
   "Sentinels are emitted even when description is nil."
   (plane-org-sync-test-with-org-buffer ""
-    (let ((plane-org-sync-instance-url "https://app.plane.so")
+    (let ((plane-org-sync-instance-url "https://api.plane.so")
           (plane-org-sync-workspace "ws")
           (item (plane-org-sync-test--make-work-item
                  :description_html nil)))
@@ -509,7 +515,7 @@ Uses KEYWORD as the TODO keyword."
 (ert-deftest plane-org-sync-org-test-update-heading-title-change ()
   "Updating a heading changes the title."
   (plane-org-sync-test-with-org-buffer ""
-    (let* ((plane-org-sync-instance-url "https://app.plane.so")
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
            (plane-org-sync-workspace "ws")
            (plane-org-sync--inhibit-push t)
            (item (plane-org-sync-test--make-work-item :name "Old title"))
@@ -528,7 +534,7 @@ Uses KEYWORD as the TODO keyword."
 (ert-deftest plane-org-sync-org-test-update-heading-description-change ()
   "Updating a heading replaces the description between sentinels."
   (plane-org-sync-test-with-org-buffer ""
-    (let* ((plane-org-sync-instance-url "https://app.plane.so")
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
            (plane-org-sync-workspace "ws")
            (plane-org-sync--inhibit-push t)
            (item (plane-org-sync-test--make-work-item
@@ -552,7 +558,7 @@ Uses KEYWORD as the TODO keyword."
 (ert-deftest plane-org-sync-org-test-update-heading-description-removal ()
   "Setting description to nil removes content but keeps sentinels."
   (plane-org-sync-test-with-org-buffer ""
-    (let* ((plane-org-sync-instance-url "https://app.plane.so")
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
            (plane-org-sync-workspace "ws")
            (plane-org-sync--inhibit-push t)
            (item (plane-org-sync-test--make-work-item
@@ -579,7 +585,7 @@ Uses KEYWORD as the TODO keyword."
 (ert-deftest plane-org-sync-org-test-update-heading-preserves-sub-heading ()
   "Content after description-end sentinel is preserved."
   (plane-org-sync-test-with-org-buffer ""
-    (let* ((plane-org-sync-instance-url "https://app.plane.so")
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
            (plane-org-sync-workspace "ws")
            (plane-org-sync--inhibit-push t)
            (item (plane-org-sync-test--make-work-item
@@ -608,7 +614,7 @@ Uses KEYWORD as the TODO keyword."
 (ert-deftest plane-org-sync-org-test-update-heading-preserves-content-after-sentinel ()
   "Non-heading content after description-end sentinel is preserved."
   (plane-org-sync-test-with-org-buffer ""
-    (let* ((plane-org-sync-instance-url "https://app.plane.so")
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
            (plane-org-sync-workspace "ws")
            (plane-org-sync--inhibit-push t)
            (item (plane-org-sync-test--make-work-item

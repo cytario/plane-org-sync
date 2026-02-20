@@ -27,8 +27,15 @@
 
 ;;;; Connection Settings
 
-(defcustom plane-org-sync-instance-url "https://app.plane.so"
-  "Base URL of the Plane instance.
+(defcustom plane-org-sync-instance-url "https://api.plane.so"
+  "API base URL of the Plane instance.
+This is the URL used for API requests, not the browser URL.
+
+Plane Cloud users should use `https://api.plane.so' (the default).
+Self-hosted users should use their instance URL, e.g.
+`https://plane.example.com', which typically serves both the
+frontend and API.
+
 Must use HTTPS.  Do not include a trailing slash."
   :type 'string
   :group 'plane-org-sync
@@ -185,7 +192,8 @@ Returns the parsed JSON plist on 2xx, signals error otherwise."
          (url-request-method "GET")
          (url-request-extra-headers
           `(("X-API-Key" . ,api-key)
-            ("Content-Type" . "application/json")))
+            ("Content-Type" . "application/json")
+            ("Accept" . "application/json")))
          (buffer (url-retrieve-synchronously full-url nil nil 10)))
     (unless buffer
       (error "No response from %s (url-retrieve returned nil)"
@@ -234,6 +242,11 @@ connection by calling the Plane API, then persists settings via
     (setq url (string-trim-right url "/"))
     (unless (string-prefix-p "https://" url)
       (user-error "Instance URL must use HTTPS.  Got: %s" url))
+    ;; Auto-correct Cloud frontend URL to API URL.
+    (when (string-match-p "\\bapp\\.plane\\.so\\b" url)
+      (setq url (replace-regexp-in-string
+                 "\\bapp\\.plane\\.so\\b" "api.plane.so" url))
+      (message "Note: Plane Cloud API uses api.plane.so, not app.plane.so.  Correcting URL."))
     ;; 2. Workspace slug.
     (let ((workspace (read-string "Workspace slug: "
                                   plane-org-sync-workspace)))

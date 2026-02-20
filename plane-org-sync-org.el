@@ -60,15 +60,21 @@ with underscores, downcase, and strip leading/trailing underscores."
     tag))
 
 (defun plane-org-sync-org--build-plane-url (instance workspace project-id sequence-id)
-  "Build a Plane work item URL.
+  "Build a Plane work item browser URL.
 INSTANCE is the base URL, WORKSPACE the slug, PROJECT-ID the UUID,
 and SEQUENCE-ID the integer work item number.
+For Plane Cloud, INSTANCE may be the API URL (`api.plane.so');
+this function rewrites it to the frontend URL (`app.plane.so')
+so that browser links work correctly.
 Returns a URL like \"https://app.plane.so/ws/projects/pid/work-items/42\"."
-  (format "%s/%s/projects/%s/work-items/%s"
-          (string-trim-right instance "/")
-          workspace
-          project-id
-          sequence-id))
+  (let ((browser-url (replace-regexp-in-string
+                      "\\bapi\\.plane\\.so\\b" "app.plane.so"
+                      (string-trim-right instance "/"))))
+    (format "%s/%s/projects/%s/work-items/%s"
+            browser-url
+            workspace
+            project-id
+            sequence-id)))
 
 ;;;; HTML-to-Org Converter
 

@@ -89,7 +89,8 @@ on success, or (nil ERROR-MESSAGE) on error."
   (let* ((url-request-method method)
          (url-request-extra-headers
           `(("X-API-Key" . ,(plane-org-sync-config--get-api-key))
-            ("Content-Type" . "application/json")))
+            ("Content-Type" . "application/json")
+            ("Accept" . "application/json")))
          (url-request-data (when body (json-serialize body)))
          (full-url (concat (plane-org-sync-api--base-url) path))
          (cb (or callback #'ignore)))
@@ -154,7 +155,8 @@ blocking time: 5s request + 2s backoff + 5s retry = 12s."
   (let* ((url-request-method method)
          (url-request-extra-headers
           `(("X-API-Key" . ,(plane-org-sync-config--get-api-key))
-            ("Content-Type" . "application/json")))
+            ("Content-Type" . "application/json")
+            ("Accept" . "application/json")))
          (url-request-data (when body (json-serialize body)))
          (full-url (concat (plane-org-sync-api--base-url) path))
          (buffer (condition-case err
@@ -295,7 +297,8 @@ tracks retries; 429 responses trigger exponential backoff."
     (let* ((url-request-method method)
            (url-request-extra-headers
             `(("X-API-Key" . ,(plane-org-sync-config--get-api-key))
-              ("Content-Type" . "application/json")))
+              ("Content-Type" . "application/json")
+              ("Accept" . "application/json")))
            (url-request-data (when body (json-serialize body)))
            (full-url (concat (plane-org-sync-api--base-url) path))
            (cb (or callback #'ignore)))

@@ -1257,7 +1257,7 @@ validation, and the setup wizard.
 ;;   - (defgroup plane-org-sync nil ...)
 
 ;; Section 3: Connection settings
-;;   - plane-org-sync-instance-url (defcustom, string, default "https://app.plane.so")
+;;   - plane-org-sync-instance-url (defcustom, string, default "https://api.plane.so")
 ;;   - plane-org-sync-api-key (defcustom, choice: nil or string)
 ;;   - plane-org-sync-workspace (defcustom, string or nil)
 

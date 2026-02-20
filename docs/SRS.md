@@ -113,9 +113,15 @@ If validation fails, the system displays a descriptive error in the minibuffer.
 Refs: URS-PS-10101
 
 **[SRS-PS-310102] Instance URL Configuration**
-The system accepts a Plane instance base URL via `plane-org-sync-instance-url`.
-Default value: `https://app.plane.so`. The URL must use HTTPS. If the URL does
+The system accepts a Plane API base URL via `plane-org-sync-instance-url`.
+Default value: `https://api.plane.so`. The URL must use HTTPS. If the URL does
 not respond or returns a non-Plane response, the system reports the error.
+
+Note: This URL is the API endpoint, not the browser URL. Plane Cloud uses
+`api.plane.so` for API access and `app.plane.so` for browser access. The
+`PLANE_URL` property on synced headings uses the browser URL (`app.plane.so`)
+for human navigation, while `plane-org-sync-instance-url` is used exclusively
+for API calls.
 Refs: URS-PS-10101
 
 **[SRS-PS-310103] Workspace Configuration**

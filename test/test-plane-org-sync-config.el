@@ -20,12 +20,12 @@
 
 (ert-deftest plane-org-sync-config-test-https-url-accepted ()
   "HTTPS URLs should pass validation without error."
-  (let ((plane-org-sync-instance-url "https://app.plane.so"))
+  (let ((plane-org-sync-instance-url "https://api.plane.so"))
     (should (eq nil (plane-org-sync-config--validate-instance-url)))))
 
 (ert-deftest plane-org-sync-config-test-http-url-rejected ()
   "HTTP URLs should signal a `user-error'."
-  (let ((plane-org-sync-instance-url "http://app.plane.so"))
+  (let ((plane-org-sync-instance-url "http://api.plane.so"))
     (should-error (plane-org-sync-config--validate-instance-url)
                   :type 'user-error)))
 
@@ -38,7 +38,7 @@
 
 (ert-deftest plane-org-sync-config-test-direct-api-key ()
   "A non-empty string `plane-org-sync-api-key' is returned directly."
-  (let ((plane-org-sync-instance-url "https://app.plane.so")
+  (let ((plane-org-sync-instance-url "https://api.plane.so")
         (plane-org-sync-api-key "my-secret-key"))
     (should (equal "my-secret-key"
                    (plane-org-sync-config--get-api-key)))))
@@ -47,7 +47,7 @@
 
 (ert-deftest plane-org-sync-config-test-empty-string-api-key ()
   "An empty string `plane-org-sync-api-key' falls through to auth-source."
-  (let ((plane-org-sync-instance-url "https://app.plane.so")
+  (let ((plane-org-sync-instance-url "https://api.plane.so")
         (plane-org-sync-api-key ""))
     (cl-letf (((symbol-function 'auth-source-search)
                (lambda (&rest _args)
@@ -74,7 +74,7 @@
 
 (ert-deftest plane-org-sync-config-test-functional-secret ()
   "A functional :secret from auth-source is funcall'd."
-  (let ((plane-org-sync-instance-url "https://app.plane.so")
+  (let ((plane-org-sync-instance-url "https://api.plane.so")
         (plane-org-sync-api-key nil))
     (cl-letf (((symbol-function 'auth-source-search)
                (lambda (&rest _args)
@@ -86,7 +86,7 @@
 
 (ert-deftest plane-org-sync-config-test-missing-key-signals-error ()
   "When no key is configured and auth-source finds nothing, signal `user-error'."
-  (let ((plane-org-sync-instance-url "https://app.plane.so")
+  (let ((plane-org-sync-instance-url "https://api.plane.so")
         (plane-org-sync-api-key nil))
     (cl-letf (((symbol-function 'auth-source-search)
                (lambda (&rest _args) nil)))
