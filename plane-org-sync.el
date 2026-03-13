@@ -228,18 +228,35 @@ corresponding result slot is (:error . message)."
   "Idle timer for automatic sync.")
 
 (defun plane-org-sync--schedule-auto-sync ()
-  "Schedule the next auto sync after idle interval."
+  "Schedule the next auto sync after idle interval.
+Uses `plane-org-sync--backoff-multiplier' to increase the delay
+after failed syncs."
   (when (and plane-org-sync-mode
              plane-org-sync-auto-interval
              (not plane-org-sync--timer))
-    (setq plane-org-sync--timer
-          (run-with-idle-timer
-           plane-org-sync-auto-interval nil
-           (lambda ()
-             (setq plane-org-sync--timer nil)
-             (plane-org-sync-pull
-              (lambda (&rest _)
-                (plane-org-sync--schedule-auto-sync))))))))
+    (let ((delay (* plane-org-sync-auto-interval
+                    plane-org-sync--backoff-multiplier)))
+      (setq plane-org-sync--timer
+            (run-with-idle-timer
+             delay nil
+             (lambda ()
+               (setq plane-org-sync--timer nil)
+               (plane-org-sync-pull
+                (lambda (result)
+                  (if result
+                      ;; Success: reset backoff.
+                      (setq plane-org-sync--backoff-multiplier 1
+                            plane-org-sync--consecutive-failures 0)
+                    ;; Failure: increase backoff.
+                    (setq plane-org-sync--backoff-multiplier
+                          (min 8 (* 2 plane-org-sync--backoff-multiplier)))
+                    (cl-incf plane-org-sync--consecutive-failures)
+                    (when (>= plane-org-sync--consecutive-failures 3)
+                      (message
+                       "Plane: rate limited repeatedly, backing off to %ds"
+                       (* plane-org-sync-auto-interval
+                          plane-org-sync--backoff-multiplier))))
+                  (plane-org-sync--schedule-auto-sync)))))))))
 
 ;;;; Pull Command
 
@@ -250,76 +267,115 @@ CALLBACK, if provided, is called with a plist (:created N :updated M)
 when the sync completes.  When called interactively, results are
 displayed in the minibuffer."
   (interactive)
-  (unless plane-org-sync-projects
-    (user-error "No projects configured.  Set `plane-org-sync-projects'"))
-  ;; Check for unsaved modifications BEFORE any mutations.
-  (let ((buf (find-buffer-visiting plane-org-sync-file)))
-    (when (and buf (buffer-modified-p buf))
-      (user-error
-       "Sync file has unsaved modifications.  Save the file first, then re-run sync")))
-  ;; Step 1: Get user ID.
-  (plane-org-sync-api-me
-   (lambda (status-code body)
-     (if (null status-code)
-         (progn
-           (message "Plane: failed to get user info: %s" body)
-           (when callback (funcall callback nil)))
-       (let ((user-id (plist-get body :id)))
-         (setq plane-org-sync--user-id user-id)
-         ;; Step 2: Fan-out across projects.
-         (let ((project-fns
-                (mapcar
-                 (lambda (project-id)
-                   (lambda (slot-cb)
-                     ;; Fetch states first, then work items.
-                     (plane-org-sync-api-list-states
-                      project-id
-                      (lambda (st-status states)
-                        (if (null st-status)
-                            ;; States fetch failed.
-                            (funcall slot-cb
-                                     (list :error states
-                                           :project-id project-id))
-                          ;; Cache states.
-                          (let ((state-plists
-                                 (seq-map
-                                  (lambda (s)
-                                    (list :id (plist-get s :id)
-                                          :name (plist-get s :name)
-                                          :group (plist-get s :group)
-                                          :sequence
-                                          (or (plist-get s :sequence) 0)))
-                                  states)))
-                            ;; Update state cache for this project.
-                            (setf (alist-get project-id
-                                             plane-org-sync--state-cache
-                                             nil nil #'equal)
-                                  state-plists)
-                            ;; Fetch work items.
-                            (let ((params
-                                   (when (and plane-org-sync-filter-assignee
-                                             user-id)
-                                     (list (cons "assignees" user-id)))))
-                              (plane-org-sync-api-list-work-items
-                               project-id params
-                               (lambda (items &optional error-msg)
-                                 (if (and (null items) error-msg)
-                                     (funcall slot-cb
-                                              (list :error error-msg
-                                                    :project-id project-id))
-                                   (funcall
-                                    slot-cb
-                                    (list :items items
-                                          :states state-plists
-                                          :project-id
-                                          project-id))))))))))))
-                 plane-org-sync-projects)))
-           ;; Collect all project results.
-           (plane-org-sync--collect
-            project-fns
-            (lambda (project-results)
-              (plane-org-sync--pull-apply-results
-               project-results callback)))))))))
+  (if plane-org-sync--sync-in-progress
+      (progn
+        (plane-org-sync-api--log 'info "Sync already in progress, skipping")
+        (message "Plane: sync already in progress, skipping")
+        (when callback (funcall callback nil)))
+    (unless plane-org-sync-projects
+      (user-error "No projects configured.  Set `plane-org-sync-projects'"))
+    ;; Check for unsaved modifications BEFORE any mutations.
+    (let ((buf (find-buffer-visiting plane-org-sync-file)))
+      (when (and buf (buffer-modified-p buf))
+        (user-error
+         "Sync file has unsaved modifications.  Save the file first, then re-run sync")))
+    (setq plane-org-sync--sync-in-progress t)
+    ;; Wrap callback to clear in-progress flag on all exit paths.
+    (let ((wrapped-cb (lambda (result)
+                        (setq plane-org-sync--sync-in-progress nil)
+                        (when callback (funcall callback result)))))
+      ;; Step 1: Get user ID (skip API call if already cached).
+      (if plane-org-sync--user-id
+          (plane-org-sync--pull-fetch-projects
+           plane-org-sync--user-id wrapped-cb)
+        (plane-org-sync-api-me
+         (lambda (status-code body)
+           (if (null status-code)
+               (progn
+                 (setq plane-org-sync--sync-in-progress nil)
+                 (message "Plane: failed to get user info: %s" body)
+                 (when callback (funcall callback nil)))
+             (let ((user-id (plist-get body :id)))
+               (setq plane-org-sync--user-id user-id)
+               (plane-org-sync--pull-fetch-projects
+                user-id wrapped-cb)))))))))
+
+(defun plane-org-sync--state-cache-fresh-p (project-id)
+  "Return non-nil if the state cache for PROJECT-ID is less than 10 minutes old."
+  (when-let* ((ts (cdr (assoc project-id plane-org-sync--state-cache-timestamp))))
+    (< (float-time (time-subtract (current-time) ts)) 600)))
+
+(defun plane-org-sync--pull-fetch-projects (user-id callback)
+  "Fan out across configured projects to fetch states and work items.
+USER-ID is the authenticated Plane user ID.  CALLBACK is passed
+through to `plane-org-sync--pull-apply-results'."
+  (let ((project-fns
+         (mapcar
+          (lambda (project-id)
+            (lambda (slot-cb)
+              ;; Use cached states if fresh, otherwise fetch.
+              (let ((cached (and (plane-org-sync--state-cache-fresh-p project-id)
+                                 (cdr (assoc project-id
+                                             plane-org-sync--state-cache)))))
+                (if cached
+                    ;; States are cached and fresh — skip to work items.
+                    (plane-org-sync--pull-fetch-work-items
+                     project-id cached user-id slot-cb)
+                  ;; Fetch states from API.
+                  (plane-org-sync-api-list-states
+                   project-id
+                   (lambda (st-status states)
+                     (if (null st-status)
+                         (funcall slot-cb
+                                  (list :error states
+                                        :project-id project-id))
+                       (let ((state-plists
+                              (seq-map
+                               (lambda (s)
+                                 (list :id (plist-get s :id)
+                                       :name (plist-get s :name)
+                                       :group (plist-get s :group)
+                                       :sequence
+                                       (or (plist-get s :sequence) 0)))
+                               states)))
+                         ;; Update state cache and timestamp.
+                         (setf (alist-get project-id
+                                          plane-org-sync--state-cache
+                                          nil nil #'equal)
+                               state-plists)
+                         (setf (alist-get project-id
+                                          plane-org-sync--state-cache-timestamp
+                                          nil nil #'equal)
+                               (current-time))
+                         (plane-org-sync--pull-fetch-work-items
+                          project-id state-plists user-id
+                          slot-cb)))))))))
+          plane-org-sync-projects)))
+    ;; Collect all project results.
+    (plane-org-sync--collect
+     project-fns
+     (lambda (project-results)
+       (plane-org-sync--pull-apply-results
+        project-results callback)))))
+
+(defun plane-org-sync--pull-fetch-work-items
+    (project-id state-plists user-id slot-cb)
+  "Fetch work items for PROJECT-ID given STATE-PLISTS.
+USER-ID is used for assignee filtering.  SLOT-CB receives the
+project result plist."
+  (let ((params (when (and plane-org-sync-filter-assignee user-id)
+                  (list (cons "assignees" user-id)))))
+    (plane-org-sync-api-list-work-items
+     project-id params
+     (lambda (items &optional error-msg)
+       (if (and (null items) error-msg)
+           (funcall slot-cb
+                    (list :error error-msg
+                          :project-id project-id))
+         (funcall slot-cb
+                  (list :items items
+                        :states state-plists
+                        :project-id project-id)))))))
 
 (defun plane-org-sync--pull-apply-results (project-results callback)
   "Apply PROJECT-RESULTS to the Org sync file.
@@ -619,9 +675,13 @@ re-matched by PLANE_ID and updated."
         (save-buffer))))
   ;; Clear in-memory caches.
   (setq plane-org-sync--state-cache nil)
+  (setq plane-org-sync--state-cache-timestamp nil)
   (setq plane-org-sync--user-id nil)
   (setq plane-org-sync--last-sync nil)
   (setq plane-org-sync--last-sync-result nil)
+  (setq plane-org-sync--sync-in-progress nil)
+  (setq plane-org-sync--backoff-multiplier 1)
+  (setq plane-org-sync--consecutive-failures 0)
   (message "plane-org-sync: state cleared, starting fresh pull...")
   ;; Trigger a fresh pull.
   (plane-org-sync-pull))

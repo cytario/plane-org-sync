@@ -43,6 +43,14 @@
 - `(let ((idx i)) ...)` for correct closure capture in `--collect`
 - ALWAYS capture `plist-put` return value -- not guaranteed to mutate in place
 
+## 429 Rate Limit Storm (2026-03-13) -- RESOLVED
+- Root causes: uncached user-id, no sync overlap guard, immediate re-arm after failure, states re-fetched every sync
+- All fixes implemented and reviewed: tasks #10-#14 PASS
+- Pull refactored into 4 functions: pull (entry) -> pull-fetch-projects -> pull-fetch-work-items -> pull-apply-results
+- New defvars in config.el: `--state-cache-timestamp`, `--sync-in-progress`, `--backoff-multiplier`, `--consecutive-failures`
+- Steady-state: 1 request/sync/project (work-items only) after first sync
+- Note: api-me error path (line 295) uses unwrapped callback (not wrapped-cb) -- correct but subtle
+
 ## Open Questions Requiring API Verification
 - `/work-items/` endpoint existence and response format (V1)
 - `?expand=state,labels,assignees` support on `/work-items/` (V3)

@@ -144,6 +144,22 @@ Each STATES-LIST element is a plist with :id, :name, :group keys.
 Populated at the start of each pull; invalidated on reset or
 project configuration change.")
 
+(defvar plane-org-sync--state-cache-timestamp nil
+  "Alist of (PROJECT-ID . TIME) recording when states were last fetched.
+Used to skip redundant state fetches within a 10-minute window.")
+
+(defvar plane-org-sync--sync-in-progress nil
+  "Non-nil while an async pull is in flight.
+Prevents overlapping syncs from firing concurrently.")
+
+(defvar plane-org-sync--backoff-multiplier 1
+  "Multiplier for the auto-sync interval after failures.
+Doubles on each failed sync (capped at 8), resets to 1 on success.")
+
+(defvar plane-org-sync--consecutive-failures 0
+  "Count of consecutive sync failures.
+Used to trigger a warning after repeated rate-limit errors.")
+
 ;;;; HTTPS Validation
 
 (defun plane-org-sync-config--validate-instance-url ()

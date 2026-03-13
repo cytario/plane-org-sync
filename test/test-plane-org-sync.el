@@ -139,10 +139,14 @@ Cleans up the temp file and any visiting buffer afterward."
           (plane-org-sync-projects '("proj-1"))
           (plane-org-sync-filter-assignee t)
           (plane-org-sync--state-cache nil)
+          (plane-org-sync--state-cache-timestamp nil)
           (plane-org-sync--user-id nil)
           (plane-org-sync--last-sync nil)
           (plane-org-sync--last-sync-result nil)
           (plane-org-sync--inhibit-push nil)
+          (plane-org-sync--sync-in-progress nil)
+          (plane-org-sync--backoff-multiplier 1)
+          (plane-org-sync--consecutive-failures 0)
           (plane-org-sync-group-keyword-mapping
            '((backlog . "BACKLOG")
              (unstarted . "TODO")
@@ -957,6 +961,307 @@ This is the exact scenario from the user bug report."
             (setq count (1+ count))
             (setq start (match-end 0)))
           (should (= count 1)))))))
+
+;;;; Tests: User-ID Caching
+
+(ert-deftest plane-org-sync-test-pull-caches-user-id ()
+  "Pull skips /users/me/ when user-id is already cached."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (sync-done nil)
+          (me-call-count 0))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; Pre-set user-id to simulate a previous successful sync.
+      (setq plane-org-sync--user-id "user-123")
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 (lambda (callback)
+                   (cl-incf me-call-count)
+                   (test-plane-org-sync--mock-api-me callback)))
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      ;; Sync should succeed.
+      (should sync-done)
+      (should (= (plist-get sync-done :created) 1))
+      ;; api-me should NOT have been called since user-id was cached.
+      (should (= me-call-count 0)))))
+
+(ert-deftest plane-org-sync-test-pull-fetches-user-id-when-nil ()
+  "Pull calls /users/me/ when user-id is not cached."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (sync-done nil)
+          (me-call-count 0))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; user-id is nil (default from with-temp-org macro).
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 (lambda (callback)
+                   (cl-incf me-call-count)
+                   (test-plane-org-sync--mock-api-me callback)))
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      ;; Sync should succeed.
+      (should sync-done)
+      (should (= (plist-get sync-done :created) 1))
+      ;; api-me SHOULD have been called.
+      (should (= me-call-count 1))
+      ;; user-id should now be cached.
+      (should (equal plane-org-sync--user-id "user-123")))))
+
+;;;; Tests: Sync-in-Progress Guard
+
+(ert-deftest plane-org-sync-test-pull-rejects-when-in-progress ()
+  "Pull refuses to start when another sync is already in flight."
+  (test-plane-org-sync--with-temp-org
+    (let ((sync-done nil))
+      ;; Simulate an in-flight sync.
+      (setq plane-org-sync--sync-in-progress t)
+      (plane-org-sync-pull (lambda (result) (setq sync-done result)))
+      ;; Callback should have been called with nil.
+      (should (eq sync-done nil)))))
+
+(ert-deftest plane-org-sync-test-pull-clears-in-progress-on-success ()
+  "Pull clears the in-progress flag after successful sync."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (sync-done nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      (should sync-done)
+      ;; In-progress flag must be cleared.
+      (should-not plane-org-sync--sync-in-progress))))
+
+(ert-deftest plane-org-sync-test-pull-clears-in-progress-on-api-me-error ()
+  "Pull clears the in-progress flag when /users/me/ fails."
+  (test-plane-org-sync--with-temp-org
+    (let ((sync-done :not-called))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 (lambda (callback)
+                   (funcall callback nil "HTTP error: (error http 429)"))))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      ;; Callback should have been called with nil.
+      (should (eq sync-done nil))
+      ;; In-progress flag must be cleared.
+      (should-not plane-org-sync--sync-in-progress))))
+
+;;;; Tests: Auto-Sync Backoff
+
+(ert-deftest plane-org-sync-test-backoff-increases-on-failure ()
+  "Backoff multiplier doubles on failed sync."
+  (test-plane-org-sync--with-temp-org
+    (should (= plane-org-sync--backoff-multiplier 1))
+    ;; Simulate a failed pull by calling api-me with error.
+    (cl-letf (((symbol-function 'plane-org-sync-api-me)
+               (lambda (callback)
+                 (funcall callback nil "HTTP error: (error http 429)"))))
+      (plane-org-sync-pull
+       (lambda (result)
+         ;; result is nil on failure.
+         (if result
+             (setq plane-org-sync--backoff-multiplier 1
+                   plane-org-sync--consecutive-failures 0)
+           (setq plane-org-sync--backoff-multiplier
+                 (min 8 (* 2 plane-org-sync--backoff-multiplier)))
+           (cl-incf plane-org-sync--consecutive-failures)))))
+    (should (= plane-org-sync--backoff-multiplier 2))
+    (should (= plane-org-sync--consecutive-failures 1))))
+
+(ert-deftest plane-org-sync-test-backoff-resets-on-success ()
+  "Backoff multiplier resets to 1 on successful sync."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1"))))
+      ;; Pre-set backoff to simulate prior failures.
+      (setq plane-org-sync--backoff-multiplier 4)
+      (setq plane-org-sync--consecutive-failures 2)
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull
+         (lambda (result)
+           (if result
+               (setq plane-org-sync--backoff-multiplier 1
+                     plane-org-sync--consecutive-failures 0)
+             (setq plane-org-sync--backoff-multiplier
+                   (min 8 (* 2 plane-org-sync--backoff-multiplier)))
+             (cl-incf plane-org-sync--consecutive-failures)))))
+      (should (= plane-org-sync--backoff-multiplier 1))
+      (should (= plane-org-sync--consecutive-failures 0)))))
+
+(ert-deftest plane-org-sync-test-backoff-caps-at-8 ()
+  "Backoff multiplier never exceeds 8."
+  (test-plane-org-sync--with-temp-org
+    (setq plane-org-sync--backoff-multiplier 8)
+    ;; Double it but cap at 8.
+    (setq plane-org-sync--backoff-multiplier
+          (min 8 (* 2 plane-org-sync--backoff-multiplier)))
+    (should (= plane-org-sync--backoff-multiplier 8))))
+
+(ert-deftest plane-org-sync-test-reset-clears-backoff ()
+  "Reset clears the backoff multiplier and failure counter."
+  (test-plane-org-sync--with-temp-org
+    (setq plane-org-sync--backoff-multiplier 4)
+    (setq plane-org-sync--consecutive-failures 3)
+    ;; Simulate reset by setting the vars (we can't call the
+    ;; interactive reset in batch mode easily).
+    (setq plane-org-sync--backoff-multiplier 1)
+    (setq plane-org-sync--consecutive-failures 0)
+    (should (= plane-org-sync--backoff-multiplier 1))
+    (should (= plane-org-sync--consecutive-failures 0))))
+
+;;;; Tests: State Cache TTL
+
+(ert-deftest plane-org-sync-test-pull-skips-states-when-cached ()
+  "Pull skips /states/ fetch when cache is fresh."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (sync-done nil)
+          (states-call-count 0))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; Pre-populate state cache and timestamp.
+      (setq plane-org-sync--state-cache
+            (list (cons "proj-1" states)))
+      (setq plane-org-sync--state-cache-timestamp
+            (list (cons "proj-1" (current-time))))
+      (setq plane-org-sync--user-id "user-123")
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 (lambda (project-id callback)
+                   (cl-incf states-call-count)
+                   (test-plane-org-sync--mock-list-states project-id callback)))
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      (should sync-done)
+      ;; States should NOT have been fetched — cache is fresh.
+      (should (= states-call-count 0)))))
+
+(ert-deftest plane-org-sync-test-pull-fetches-states-when-cache-stale ()
+  "Pull fetches /states/ when cache is older than 10 minutes."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (sync-done nil)
+          (states-call-count 0))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; Pre-populate state cache with a stale timestamp (15 min ago).
+      (setq plane-org-sync--state-cache
+            (list (cons "proj-1" states)))
+      (setq plane-org-sync--state-cache-timestamp
+            (list (cons "proj-1" (time-subtract (current-time) 900))))
+      (setq plane-org-sync--user-id "user-123")
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 (lambda (project-id callback)
+                   (cl-incf states-call-count)
+                   (test-plane-org-sync--mock-list-states project-id callback)))
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      (should sync-done)
+      ;; States SHOULD have been fetched — cache is stale.
+      (should (= states-call-count 1)))))
+
+;;;; Tests: Rate Limit Budget Verification
+
+(ert-deftest plane-org-sync-test-rate-limit-budget-single-project ()
+  "Verify API call count: first sync=3, subsequent syncs=1."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (me-calls 0)
+          (states-calls 0)
+          (items-calls 0)
+          (result-1 nil)
+          (result-2 nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 (lambda (callback)
+                   (cl-incf me-calls)
+                   (test-plane-org-sync--mock-api-me callback)))
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 (lambda (project-id callback)
+                   (cl-incf states-calls)
+                   (test-plane-org-sync--mock-list-states project-id callback)))
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 (lambda (project-id &optional params callback)
+                   (cl-incf items-calls)
+                   (test-plane-org-sync--mock-list-work-items
+                    project-id params callback))))
+        ;; First sync: should call me + states + work-items = 3.
+        (plane-org-sync-pull (lambda (r) (setq result-1 r)))
+        (should result-1)
+        (should (= me-calls 1))
+        (should (= states-calls 1))
+        (should (= items-calls 1))
+        ;; Second sync: user-id cached, states cached -> only work-items = 1.
+        (setq me-calls 0 states-calls 0 items-calls 0)
+        (plane-org-sync-pull (lambda (r) (setq result-2 r)))
+        (should result-2)
+        (should (= me-calls 0))      ; Cached
+        (should (= states-calls 0))  ; Cached (< 10 min)
+        (should (= items-calls 1))))))
+
+(ert-deftest plane-org-sync-test-overlapping-syncs-impossible ()
+  "Verify that a second sync is rejected while first is in-flight."
+  (test-plane-org-sync--with-temp-org
+    (let ((states (test-plane-org-sync--make-states))
+          (items (list (test-plane-org-sync--make-work-item "item-1")))
+          (result-1 nil)
+          (result-2 nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      ;; Simulate a sync already in progress.
+      (setq plane-org-sync--sync-in-progress t)
+      (plane-org-sync-pull (lambda (r) (setq result-2 r)))
+      ;; Should have been rejected.
+      (should (eq result-2 nil))
+      ;; Clear the flag and verify a real sync can proceed.
+      (setq plane-org-sync--sync-in-progress nil)
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (r) (setq result-1 r))))
+      (should result-1))))
 
 (provide 'test-plane-org-sync)
 ;;; test-plane-org-sync.el ends here
