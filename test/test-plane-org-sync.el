@@ -108,6 +108,7 @@ error, use a cons cell (error . MESSAGE)."
                     :priority "medium"
                     :updated_at "2026-01-15T10:00:00Z"
                     :description_html "<p>Test description</p>"
+                    :assignees ["user-123"]
                     :labels []
                     :assignee_details []
                     :start_date nil
@@ -678,7 +679,9 @@ Cleans up the temp file and any visiting buffer afterward."
                               :description_html nil
                               :labels (vector (list :id "lbl-1"
                                                     :name "Backend"))
-                              :assignees (vector (list :id "u-1"
+                              :assignees (vector (list :id "user-123"
+                                                       :display_name "Test User")
+                                                (list :id "u-1"
                                                        :display_name "Alice"))
                               :assignee_details []
                               :start_date nil
@@ -711,8 +714,142 @@ Cleans up the temp file and any visiting buffer afterward."
         (should (string-match-p ":PLANE_STATE_ID: state-started" content))
         ;; Label should appear as tag.
         (should (string-match-p ":backend:" content))
-        ;; Assignee should appear in property.
-        (should (string-match-p ":PLANE_ASSIGNEES: Alice" content))))))
+        ;; Assignees should appear in property (includes the user
+        ;; since filtering is active).
+        (should (string-match-p ":PLANE_ASSIGNEES: Test User, Alice" content))))))
+
+;;;; Tests: Client-Side Assignee Filtering
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-uuid-strings ()
+  "Filter keeps items assigned to user-id (UUID string format)."
+  (let ((plane-org-sync-filter-assignee t)
+        (items (list (list :id "a" :assignees ["user-1" "user-2"])
+                     (list :id "b" :assignees ["user-3"])
+                     (list :id "c" :assignees ["user-1"]))))
+    (let ((result (plane-org-sync--filter-by-assignee items "user-1")))
+      (should (= 2 (length result)))
+      (should (equal "a" (plist-get (car result) :id)))
+      (should (equal "c" (plist-get (cadr result) :id))))))
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-expanded-objects ()
+  "Filter keeps items when assignees are expanded plist objects."
+  (let ((plane-org-sync-filter-assignee t)
+        (items (list (list :id "a"
+                           :assignees (vector
+                                       (list :id "user-1"
+                                             :display_name "Alice")
+                                       (list :id "user-2"
+                                             :display_name "Bob")))
+                     (list :id "b"
+                           :assignees (vector
+                                       (list :id "user-3"
+                                             :display_name "Charlie"))))))
+    (let ((result (plane-org-sync--filter-by-assignee items "user-1")))
+      (should (= 1 (length result)))
+      (should (equal "a" (plist-get (car result) :id))))))
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-empty-assignees ()
+  "Filter excludes items with empty or nil assignees."
+  (let ((plane-org-sync-filter-assignee t)
+        (items (list (list :id "a" :assignees [])
+                     (list :id "b" :assignees nil)
+                     (list :id "c")
+                     (list :id "d" :assignees ["user-1"]))))
+    (let ((result (plane-org-sync--filter-by-assignee items "user-1")))
+      (should (= 1 (length result)))
+      (should (equal "d" (plist-get (car result) :id))))))
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-disabled ()
+  "When filter-assignee is nil, all items are returned."
+  (let ((plane-org-sync-filter-assignee nil)
+        (items (list (list :id "a" :assignees ["other-user"])
+                     (list :id "b" :assignees nil)
+                     (list :id "c" :assignees ["user-1"]))))
+    (let ((result (plane-org-sync--filter-by-assignee items "user-1")))
+      (should (= 3 (length result))))))
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-nil-user-id ()
+  "When user-id is nil, all items are returned regardless of filter setting."
+  (let ((plane-org-sync-filter-assignee t)
+        (items (list (list :id "a" :assignees ["user-1"])
+                     (list :id "b" :assignees nil))))
+    (let ((result (plane-org-sync--filter-by-assignee items nil)))
+      (should (= 2 (length result))))))
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-list-format ()
+  "Filter handles assignees as a plain list (not vector)."
+  (let ((plane-org-sync-filter-assignee t)
+        (items (list (list :id "a" :assignees '("user-1" "user-2"))
+                     (list :id "b" :assignees '("user-3")))))
+    (let ((result (plane-org-sync--filter-by-assignee items "user-1")))
+      (should (= 1 (length result)))
+      (should (equal "a" (plist-get (car result) :id))))))
+
+(ert-deftest plane-org-sync-test-filter-by-assignee-multiple-assignees ()
+  "Filter includes items where user is one of multiple assignees."
+  (let ((plane-org-sync-filter-assignee t)
+        (items (list (list :id "a" :assignees ["u-1" "u-2" "user-1"]))))
+    (let ((result (plane-org-sync--filter-by-assignee items "user-1")))
+      (should (= 1 (length result))))))
+
+(ert-deftest plane-org-sync-test-pull-filter-assignee-integration ()
+  "Pull with filter-assignee=t excludes items not assigned to the user."
+  (test-plane-org-sync--with-temp-org
+    (let* ((states (test-plane-org-sync--make-states))
+           (items (list (test-plane-org-sync--make-work-item "item-mine")
+                        (test-plane-org-sync--make-work-item
+                         "item-other"
+                         (list :name "Other Person's Item"
+                               :assignees ["other-user-456"]))))
+           (sync-done nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      ;; Only the user's item should be synced.
+      (should sync-done)
+      (should (= (plist-get sync-done :created) 1))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents plane-org-sync-file)
+                       (buffer-string))))
+        (should (string-match-p "Test Item item-mine" content))
+        (should-not (string-match-p "Other Person's Item" content))))))
+
+(ert-deftest plane-org-sync-test-pull-no-filter-assignee-integration ()
+  "Pull with filter-assignee=nil syncs all items regardless of assignee."
+  (test-plane-org-sync--with-temp-org
+    (let* ((plane-org-sync-filter-assignee nil)
+           (states (test-plane-org-sync--make-states))
+           (items (list (test-plane-org-sync--make-work-item "item-mine")
+                        (test-plane-org-sync--make-work-item
+                         "item-other"
+                         (list :name "Other Person's Item"
+                               :assignees ["other-user-456"]))))
+           (sync-done nil))
+      (setq test-plane-org-sync--api-responses
+            `(("states/proj-1" . ,states)
+              ("work-items/proj-1" . ,items)))
+      (cl-letf (((symbol-function 'plane-org-sync-api-me)
+                 #'test-plane-org-sync--mock-api-me)
+                ((symbol-function 'plane-org-sync-api-list-states)
+                 #'test-plane-org-sync--mock-list-states)
+                ((symbol-function 'plane-org-sync-api-list-work-items)
+                 #'test-plane-org-sync--mock-list-work-items))
+        (plane-org-sync-pull (lambda (result) (setq sync-done result))))
+      ;; Both items should be synced.
+      (should sync-done)
+      (should (= (plist-get sync-done :created) 2))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents plane-org-sync-file)
+                       (buffer-string))))
+        (should (string-match-p "Test Item item-mine" content))
+        (should (string-match-p "Other Person's Item" content))))))
 
 ;;;; Tests: Legacy Heading Repair (Bug Fixes)
 

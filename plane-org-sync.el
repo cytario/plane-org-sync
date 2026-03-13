@@ -130,6 +130,27 @@ Handles state, labels, and assignees.  Returns the normalized ITEM."
   (setq item (plane-org-sync--normalize-assignees item))
   item)
 
+(defun plane-org-sync--filter-by-assignee (items user-id)
+  "Filter ITEMS to only those assigned to USER-ID.
+Each element of ITEMS is a work-item plist whose `:assignees' field
+may be a vector or list of UUID strings, a vector or list of plists
+with `:id', or nil.  Returns ITEMS unchanged when
+`plane-org-sync-filter-assignee' is nil or USER-ID is nil."
+  (if (and plane-org-sync-filter-assignee user-id)
+      (seq-filter
+       (lambda (item)
+         (let ((assignees (plist-get item :assignees)))
+           (when assignees
+             (seq-some
+              (lambda (a)
+                (equal (if (and (listp a) (plist-get a :id))
+                           (plist-get a :id)
+                         a)
+                       user-id))
+              (if (vectorp assignees) (append assignees nil) assignees)))))
+       items)
+    items))
+
 ;;;; Async Utilities
 
 ;; NOTE: `plane-org-sync--chain' is not used in the current pull flow
@@ -331,7 +352,9 @@ with the sync result plist."
             ;; Process each successful project.
             (dolist (pr project-results)
               (unless (plist-get pr :error)
-                (let* ((items (plist-get pr :items))
+                (let* ((items (plane-org-sync--filter-by-assignee
+                               (plist-get pr :items)
+                               plane-org-sync--user-id))
                        (states (plist-get pr :states))
                        (project-id (plist-get pr :project-id))
                        ;; Filter headings for this project.
