@@ -76,7 +76,7 @@ keywords and chooses where synced tasks should be stored.
   - "I want synced tasks in a dedicated org file, not mixed into my work.org"
   - "It should work with both app.plane.so and my self-hosted instance"
 
-#### 2.2.2 Macro-Step 2: Sync Issues from Plane to Org
+#### 2.2.2 Macro-Step 2: Sync Work Items from Plane to Org
 
 A user pulls their assigned work items from Plane into an Org file. The sync
 creates or updates Org headings with the work item's title, state, priority,
@@ -87,11 +87,12 @@ removed in Plane are updated accordingly.
   project, state)
 - **Output Data**: Org file with headings representing Plane work items
 - **User Requests**:
-  - "I only want to see issues assigned to me"
+  - "I only want to see work items assigned to me"
   - "I want to trigger sync manually with a command"
   - "It would be nice if it synced automatically every N minutes"
   - "Priority and labels from Plane should be visible in the org heading"
-  - "If an issue was closed in Plane, the org heading should show DONE"
+  - "If a work item was closed in Plane, the org heading should show DONE"
+  - "Start dates and due dates from Plane should show up in the org heading"
   - "Don't lose my local org notes when re-syncing"
 
 #### 2.2.3 Macro-Step 3: Review Tasks in Org Agenda
@@ -107,7 +108,8 @@ states just like any other org heading.
   - "Plane tasks should show up in my daily/weekly agenda"
   - "I want to see which project a task belongs to"
   - "I should be able to filter the agenda to show only Plane tasks"
-  - "Target dates from Plane should become org DEADLINE or SCHEDULED"
+  - "Start dates from Plane should become org SCHEDULED timestamps"
+  - "Target dates (due dates) from Plane should become org DEADLINE timestamps"
 
 #### 2.2.4 Macro-Step 4: Update Task State (Bidirectional)
 
@@ -124,7 +126,7 @@ by teammates in Plane appear in org after the next sync.
   - "I don't want accidental state changes — maybe confirm before pushing"
   - "If both sides changed, warn me instead of silently overwriting"
 
-#### 2.2.5 Macro-Step 5: Capture New Issues to Plane
+#### 2.2.5 Macro-Step 5: Capture New Work Items to Plane
 
 A user creates a new Plane work item directly from Emacs using org-capture. The
 captured entry is pushed to Plane as a new work item and simultaneously added to
@@ -133,10 +135,10 @@ the local org sync file.
 - **Input Data**: Task title, optional description, project, priority, labels
 - **Output Data**: New work item in Plane + corresponding org heading locally
 - **User Requests**:
-  - "I want an org-capture template that creates a Plane issue"
+  - "I want an org-capture template that creates a Plane work item"
   - "I should be able to pick the target project during capture"
   - "Priority and labels should be settable during capture"
-  - "The org heading should link back to the Plane issue URL"
+  - "The org heading should link back to the Plane work item URL"
 
 #### 2.2.6 Macro-Step 6: Manage Sync Lifecycle
 
@@ -152,7 +154,23 @@ the local state has drifted.
   - "If sync fails, don't corrupt my org file"
   - "I should be able to force a full re-sync from scratch"
 
-### 2.3 User Groups
+### 2.3 Scope Exclusions (v1.0)
+
+The following capabilities are explicitly out of scope for v1.0:
+
+- Comments sync (read or write)
+- Attachment handling
+- Sub-work-item hierarchy (flat list only)
+- Cycles and Modules (sprint/feature group membership)
+- Work item type mapping (Bug, Task, Story, Epic)
+- Description push (Org to Plane; description is one-way: Plane to Org)
+- Title push (Org to Plane; title is one-way: Plane to Org)
+- Multi-workspace support (single workspace per configuration)
+- Webhook-based real-time sync
+- Bulk operations
+- Offline mode / change queue
+
+### 2.4 User Groups
 
 | Group | Description | Characteristics |
 |-------|-------------|-----------------|
@@ -187,7 +205,7 @@ workflow.
 A user specifies which Org file receives synced work items, so that Plane tasks
 are stored separately from other org content.
 
-#### 3.1.2 Sync Issues from Plane to Org
+#### 3.1.2 Sync Work Items from Plane to Org
 
 **[URS-PS-10201] Pull Assigned Work Items**
 A user retrieves their personally assigned work items from configured Plane
@@ -237,14 +255,14 @@ corresponding Org headings after the next sync.
 A user is notified when a work item was modified in both Org and Plane since the
 last sync, so that they can decide which version to keep.
 
-#### 3.1.5 Capture New Issues to Plane
+#### 3.1.5 Capture New Work Items to Plane
 
-**[URS-PS-10501] Create Plane Issue from Org Capture**
+**[URS-PS-10501] Create Plane Work Item from Org Capture**
 A user creates a new Plane work item using an org-capture template, specifying
 title, project, priority, and labels during capture.
 
 **[URS-PS-10502] Link Captured Entry to Plane**
-A user sees a link to the newly created Plane issue in the resulting Org
+A user sees a link to the newly created Plane work item in the resulting Org
 heading, so they can navigate to it in the web UI.
 
 #### 3.1.6 Manage Sync Lifecycle
@@ -298,3 +316,4 @@ and hook functions, following established Emacs Lisp conventions.
 | Version | Date | Author | Description |
 |---------|------|--------|-------------|
 | 1.0 Draft | 2026-02-19 | Martin / Claude | Initial draft |
+| 1.0.1 | 2026-04-01 | Martin / Claude | Clarify date mappings (start_date->SCHEDULED, target_date->DEADLINE), standardize "work item" terminology, add scope exclusions section |
