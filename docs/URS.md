@@ -236,7 +236,7 @@ their other tasks, using the same navigation and filtering affordances.
 A user distinguishes Plane-synced tasks from other Org entries and identifies
 which Plane project each task belongs to.
 
-**[URS-PS-10303] Navigate to Plane Issue**
+**[URS-PS-10303] Navigate to Plane Work Item**
 A user opens the Plane web UI for a specific work item directly from the
 corresponding Org heading, to access details not synced locally (comments,
 attachments, activity).

@@ -637,6 +637,82 @@ Uses KEYWORD as the TODO keyword."
                 (should (string-match-p "My personal annotation" content))))
           (set-marker marker nil))))))
 
+;;;; Update Heading: SCHEDULED/DEADLINE
+
+(ert-deftest plane-org-sync-org-test-update-heading-dates-added ()
+  "Updating a heading adds SCHEDULED and DEADLINE from dates."
+  (plane-org-sync-test-with-org-buffer ""
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
+           (plane-org-sync-workspace "ws")
+           (plane-org-sync--inhibit-push t)
+           (item (plane-org-sync-test--make-work-item
+                  :start_date nil :target_date nil))
+           (marker (plane-org-sync-test--insert-and-get-marker
+                    (current-buffer) item "TODO"))
+           (updated-item (plane-org-sync-test--make-work-item
+                          :start_date "2026-03-15"
+                          :target_date "2026-03-31")))
+      (unwind-protect
+          (progn
+            (plane-org-sync-org--update-heading
+             (current-buffer) marker updated-item "TODO")
+            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "SCHEDULED: <2026-03-15" content))
+              (should (string-match-p "DEADLINE: <2026-03-31" content))))
+        (set-marker marker nil)))))
+
+(ert-deftest plane-org-sync-org-test-update-heading-dates-removed ()
+  "Updating a heading removes SCHEDULED and DEADLINE when dates become nil."
+  (plane-org-sync-test-with-org-buffer ""
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
+           (plane-org-sync-workspace "ws")
+           (plane-org-sync--inhibit-push t)
+           (item (plane-org-sync-test--make-work-item
+                  :start_date "2026-03-15"
+                  :target_date "2026-03-31"))
+           (marker (plane-org-sync-test--insert-and-get-marker
+                    (current-buffer) item "TODO"))
+           (updated-item (plane-org-sync-test--make-work-item
+                          :start_date nil :target_date nil)))
+      (unwind-protect
+          (progn
+            ;; Verify dates were inserted initially.
+            (let ((before (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "SCHEDULED:" before))
+              (should (string-match-p "DEADLINE:" before)))
+            ;; Update with nil dates should remove them.
+            (plane-org-sync-org--update-heading
+             (current-buffer) marker updated-item "TODO")
+            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+              (should-not (string-match-p "SCHEDULED:" content))
+              (should-not (string-match-p "DEADLINE:" content))))
+        (set-marker marker nil)))))
+
+(ert-deftest plane-org-sync-org-test-update-heading-dates-changed ()
+  "Updating a heading changes existing SCHEDULED and DEADLINE."
+  (plane-org-sync-test-with-org-buffer ""
+    (let* ((plane-org-sync-instance-url "https://api.plane.so")
+           (plane-org-sync-workspace "ws")
+           (plane-org-sync--inhibit-push t)
+           (item (plane-org-sync-test--make-work-item
+                  :start_date "2026-03-01"
+                  :target_date "2026-03-15"))
+           (marker (plane-org-sync-test--insert-and-get-marker
+                    (current-buffer) item "TODO"))
+           (updated-item (plane-org-sync-test--make-work-item
+                          :start_date "2026-04-01"
+                          :target_date "2026-04-30")))
+      (unwind-protect
+          (progn
+            (plane-org-sync-org--update-heading
+             (current-buffer) marker updated-item "TODO")
+            (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "SCHEDULED: <2026-04-01" content))
+              (should (string-match-p "DEADLINE: <2026-04-30" content))
+              (should-not (string-match-p "2026-03-01" content))
+              (should-not (string-match-p "2026-03-15" content))))
+        (set-marker marker nil)))))
+
 ;;;; Save Atomic
 
 (ert-deftest plane-org-sync-org-test-save-atomic-success ()

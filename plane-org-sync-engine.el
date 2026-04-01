@@ -23,7 +23,6 @@
 
 (declare-function plane-org-sync-api--request-sync "plane-org-sync-api"
                   (method path &optional body))
-(declare-function plane-org-sync-api--workspace-url "plane-org-sync-api" ())
 
 ;;;; State Mapping
 
@@ -131,8 +130,8 @@ populates the cache."
   "Fetch states for PROJECT-ID synchronously and cache them.
 Returns the list of state plists."
   (require 'plane-org-sync-api)
-  (let* ((path (format "%s/projects/%s/states/"
-                       (plane-org-sync-api--workspace-url)
+  (let* ((path (format "/workspaces/%s/projects/%s/states/"
+                       plane-org-sync-workspace
                        project-id))
          (response (plane-org-sync-api--request-sync "GET" path))
          (results (plist-get response :results))

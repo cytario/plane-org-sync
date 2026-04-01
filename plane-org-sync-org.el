@@ -210,7 +210,7 @@ Callers must clean up markers in `unwind-protect'."
      (delq nil
            (org-map-entries
             (lambda ()
-              (when-let ((plane-id (org-entry-get nil "PLANE_ID")))
+              (when-let* ((plane-id (org-entry-get nil "PLANE_ID")))
                 (list :plane-id plane-id
                       :plane-updated-at (org-entry-get nil "PLANE_UPDATED_AT")
                       :plane-state-id (org-entry-get nil "PLANE_STATE_ID")
