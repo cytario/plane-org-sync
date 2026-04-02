@@ -351,14 +351,14 @@ by 2026-03-31).
 | `name` | string | Heading title |
 | `state` | UUID → state name | TODO keyword (via state mapping) |
 | `priority` | string | `PLANE_PRIORITY` property + `[#A]`/`[#B]`/`[#C]` |
-| `assignees` | UUID[] | `PLANE_ASSIGNEES` property |
+| `assignees` | UUID[] | `PLANE_ASSIGNEES` property (comma-separated display names when `?expand=assignees` is available, UUIDs otherwise) |
 | `labels` | UUID[] → label names | Org tags |
 | `target_date` | date string | `DEADLINE` |
 | `start_date` | date string | `SCHEDULED` |
 | `sequence_id` | integer | Part of `PLANE_URL` |
 | `updated_at` | ISO timestamp | `PLANE_UPDATED_AT` property (conflict detection) |
 | `description_html` | HTML string | Body text (converted to org markup) |
-| `project` | UUID | `PLANE_PROJECT` property (human-readable identifier, e.g., "PROJ") + `PLANE_PROJECT_ID` property (UUID for API calls) |
+| `project` | UUID | `PLANE_PROJECT` property (human-readable identifier, e.g., "PROJ", resolved from `project_identifier` in the API response or via the projects list) + `PLANE_PROJECT_ID` property (UUID for API calls) |
 
 **Pagination:**
 - The API returns paginated results. The system must follow pagination cursors
@@ -598,3 +598,4 @@ pure Emacs Lisp.
 | Version | Date | Author | Description |
 |---------|------|--------|-------------|
 | 1.0 Draft | 2026-02-19 | Martin / Claude | Initial draft |
+| 1.0.1 | 2026-04-01 | Martin / Claude | Clarify PLANE_ASSIGNEES format, add project identifier resolution note |

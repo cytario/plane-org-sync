@@ -688,12 +688,6 @@ re-matched by PLANE_ID and updated."
 
 ;;;; Capture Template
 
-(defvar plane-org-sync--capture-project-id nil
-  "Project ID selected during capture, used by the before-finalize hook.")
-
-(defvar plane-org-sync--capture-item-name nil
-  "Work item name entered during capture, used by the before-finalize hook.")
-
 ;;;###autoload
 (defun plane-org-sync-capture-template (&optional keys)
   "Return an Org capture template entry for creating Plane work items.
@@ -763,9 +757,9 @@ item synchronously and sets PLANE_* properties on the heading."
             (let* ((path (format "/workspaces/%s/projects/%s/work-items/"
                                  plane-org-sync-workspace project-id))
                    (body (list :name title :priority priority))
-                   (_body (when selected-label-ids
-                            (setq body (plist-put body :labels
-                                                  (vconcat selected-label-ids)))))
+                   (_ (when selected-label-ids
+                        (setq body (plist-put body :labels
+                                              (vconcat selected-label-ids)))))
                    (result (plane-org-sync-api--request-sync
                             "POST" path body)))
               (when result

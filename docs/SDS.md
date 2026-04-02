@@ -284,7 +284,7 @@ Refs: SRS-PS-420102
 `plane-org-sync-org--insert-heading (work-item)`
 Appends a new top-level heading at the end of the sync file buffer with:
 - Headline: `{keyword} {priority} {title} {tags}`
-- SCHEDULED/DEADLINE from start_date/target_date
+- SCHEDULED from `start_date`, DEADLINE from `target_date`
 - PROPERTIES drawer with all PLANE_* metadata
 - Org hyperlink to the Plane work item (e.g., `[[url][PROJ-42]]`)
 - Description body (converted from HTML via the HTML-to-Org converter, Section 3.3.4)
@@ -295,7 +295,8 @@ Refs: SRS-PS-420101, SRS-PS-310401
 `plane-org-sync-org--update-heading (heading-record work-item)`
 Navigates to the heading's buffer position (via point marker) and updates:
 - Headline text (title, keyword, priority, tags)
-- SCHEDULED/DEADLINE timestamps
+- SCHEDULED timestamp from `start_date` (removed via `(org-schedule '(4))` when null)
+- DEADLINE timestamp from `target_date` (removed via `(org-deadline '(4))` when null)
 - PROPERTIES drawer values
 - Plane hyperlink line (first body line, before description)
 - First body paragraph after the link (description)
@@ -611,16 +612,17 @@ or via package-vc from a git repository.
 ### 6.1 Async Callback Pattern
 
 All API calls use `url-retrieve` with continuation-passing style callbacks.
-To avoid callback hell for multi-step operations (e.g., fetch user → fetch
-projects → fetch items), a simple async chain utility
-`plane-org-sync--chain` sequences callbacks:
+The pull sync flow uses direct callback nesting with a fan-out collector:
 
-```elisp
-(plane-org-sync--chain
-  (lambda (next) (plane-org-sync-api-me next))
-  (lambda (next user) (plane-org-sync-api-list-work-items project user next))
-  (lambda (_next items) (plane-org-sync-engine--apply items)))
-```
+1. `plane-org-sync-pull` fetches the user ID (cached after first call)
+2. `plane-org-sync--pull-fetch-projects` fans out across configured projects
+   using `plane-org-sync--collect` (parallel fan-out with ordered results)
+3. Each project fetches states (cached for 10 minutes) then work items
+4. `plane-org-sync--pull-apply-results` collects all results and applies
+   the diff to the Org buffer
+
+A utility `plane-org-sync--chain` exists for sequential async flows (e.g.,
+chained updates) but is not used in the current pull flow.
 
 ### 6.2 Labeling
 
@@ -648,10 +650,10 @@ tests.
 
 ### 6.5 Org File Safety
 
-The Org interface never modifies the sync file directly on disk. All changes
-are made in a temporary buffer, validated (e.g., `org-lint` basic checks),
-and written atomically. This prevents data loss from mid-sync crashes or
-API timeouts.
+The Org interface makes all modifications in the buffer visiting the sync file
+(obtained via `org-find-base-buffer-visiting` or `find-file-noselect`), then
+saves atomically via write-to-temp-file + rename. This prevents data loss
+from mid-sync crashes or API timeouts.
 
 ---
 
@@ -752,3 +754,4 @@ back.
 | Version | Date | Author | Description |
 |---------|------|--------|-------------|
 | 1.0 Draft | 2026-02-19 | Martin / Claude | Initial draft |
+| 1.0.1 | 2026-04-01 | Martin / Claude | Fix buffer strategy description (Section 6.5), clarify date mapping in insert/update heading, update async pattern description |

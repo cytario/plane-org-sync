@@ -44,10 +44,14 @@ Must use HTTPS.  Do not include a trailing slash."
 (defcustom plane-org-sync-api-key nil
   "Plane API key.
 If nil, the key is retrieved from `auth-source' using the instance URL host.
-If a non-empty string, used directly as the API key."
+If a non-empty string, used directly as the API key.
+
+Storing the key via auth-source (e.g., ~/.authinfo.gpg) is recommended
+over setting this variable directly, which stores it in plaintext."
   :type '(choice (const :tag "Use auth-source" nil)
                  (string :tag "API key string"))
-  :group 'plane-org-sync)
+  :group 'plane-org-sync
+  :risky t)
 
 (defcustom plane-org-sync-workspace nil
   "Plane workspace slug.
@@ -373,10 +377,13 @@ connection by calling the Plane API, then persists settings via
                   ;; 8. Persist settings.
                   (customize-save-variable 'plane-org-sync-instance-url url)
                   (customize-save-variable 'plane-org-sync-workspace workspace)
-                  (when api-key
-                    (customize-save-variable 'plane-org-sync-api-key api-key))
                   (customize-save-variable 'plane-org-sync-file sync-file)
                   (customize-save-variable 'plane-org-sync-projects selected-ids)
+                  (when api-key
+                    ;; Set for current session; do not persist to custom-file.
+                    (setq plane-org-sync-api-key api-key)
+                    (message "API key set for this session.  To persist securely, add to ~/.authinfo.gpg:\n  machine %s password YOUR_API_KEY"
+                             (url-host (url-generic-parse-url url))))
                   (message "Setup complete!  Run M-x plane-org-sync-pull to sync."))))))))))
 
 (provide 'plane-org-sync-config)
